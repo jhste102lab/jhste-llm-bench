@@ -1,0 +1,16 @@
+{
+  "version": "v2",
+  "head": {"model": "openai-codex/gpt-6.1-sol", "effort": "high"},
+  "baseline": {
+    "task": {"model": "cline-pass/deepseek-v4.1-flash-1017", "effort": "max"},
+    "scout": {"model": "openai-codex/gpt-6.1-sol", "effort": "medium"}
+  },
+  "judge_default": {"model": "anthropic/claude-opus-5-5", "effort": "medium"},
+  "web": {"model": "openai-codex/gpt-6-luna", "price_per_mtok": {"input": 0.1, "output": 0.5}},
+  "worker_timeout_minutes": 45,
+  "head_timeout_minutes": 60,
+  "small_diff_pp": 5,
+  "baseline_drift_pp": 10,
+  "worker_tools": ["read", "bash", "edit", "eval", "glob", "grep", "wait", "web_search", "write", "ast_edit"],
+  "omp_version": "18.12.3"
+}

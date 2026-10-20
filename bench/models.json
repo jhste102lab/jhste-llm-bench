@@ -1,0 +1,9 @@
+{
+  "cline-pass/deepseek-v4.1-flash-1017": {"key": "ds", "name": "DeepSeek V4.1 Flash 1017", "short": "DeepSeek", "vendor": "deepseek"},
+  "openai-codex/gpt-6.1-sol": {"key": "sol", "name": "GPT-6.1 Sol", "short": "Sol", "vendor": "openai"},
+  "openai-codex/gpt-6-luna": {"key": "luna", "name": "GPT-6 Luna", "short": "Luna", "vendor": "openai"},
+  "anthropic/claude-sonnet-5-5": {"key": "sonnet", "name": "Claude Sonnet 5.5", "short": "Sonnet", "vendor": "anthropic"},
+  "anthropic/claude-opus-5-5": {"key": "opus", "name": "Claude Opus 5.5", "short": "Opus", "vendor": "anthropic"},
+  "anthropic/claude-haiku-5-5": {"key": "haiku", "name": "Claude Haiku 5.5", "short": "Haiku", "vendor": "anthropic"},
+  "anthropic/claude-fable-5-1": {"key": "fable", "name": "Claude Fable 5.1", "short": "Fable", "vendor": "anthropic"}
+}

@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # The runner tests exercise macOS sandbox-exec profiles for real.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Unit tests
+        run: python -m unittest discover -s tests
+      - name: Leak check (hashed private terms + generic patterns)
+        run: python -m bench.leak --hashes protocol/leak-hashes.txt docs README.md PROTOCOL.md protocol/v2.json bench

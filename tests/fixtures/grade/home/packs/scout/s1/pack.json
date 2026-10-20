@@ -1,0 +1,1 @@
+{"id":"s1","role":"scout","label":{"ko":"탐색 픽스처"},"deps":"fixturedeps","base_ref":"fixture","source_repo":"fixture","reference_ref":"fixture","timeout_minutes":1,"items":4}

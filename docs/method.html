@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>측정 방법 · jhste bench</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top"><div class="wrap">
+    <a class="brand" href="index.html"><b data-i18n="brand"></b> <span data-i18n="brandSub"></span></a>
+    <nav class="nav"><a href="index.html" data-i18n="navBoard"></a><a href="method.html" aria-current="page" data-i18n="navMethod"></a><a href="https://github.com/jhste102lab/jhste-llm-bench" data-i18n="navGithub"></a></nav>
+  </div></header>
+
+  <main class="wrap"><article class="doc" id="doc"></article></main>
+
+  <script src="i18n/ko.js"></script>
+  <script src="data/bench.js"></script>
+  <script src="data/v2.js"></script>
+  <script src="i18n.js"></script>
+  <script>
+    (() => {
+      const lang = document.documentElement.lang || "ko";
+      const T = window.I18N[lang];
+      const M = T.method;
+      const loc = (x) => (typeof x === "string" ? x : x[lang] ?? x.ko);
+      const V2 = window.BENCH_V2 ?? { models: {}, suites: {} };
+      window.BENCH.roles.forEach((r) => {
+        const extra = V2.suites?.[r.id];
+        if (extra?.length) r.suites = [...extra, ...r.suites];
+      });
+      const tasks = window.BENCH.roles.map((r) => {
+        const items = r.suites.flatMap((s) => (s.tasks.length ? s.tasks.map((t) => loc(t.label)) : [loc(s.label)]));
+        return `<li><b>${T.role[r.id]}</b> · ${[...new Set(items)].join(", ")}</li>`;
+      }).join("");
+      document.getElementById("doc").innerHTML =
+        `<h1>${M.title}</h1>` +
+        M.sections.map((s) => `<section><h2>${s.h}</h2><div>${s.p.map((p) => `<p>${p}</p>`).join("")}</div></section>`).join("") +
+        `<section><h2>${M.tasksHeading}</h2><ul>${tasks}</ul></section>`;
+    })();
+  </script>
+</body>
+</html>

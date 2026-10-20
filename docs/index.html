@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>jhste bench</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top"><div class="wrap">
+    <a class="brand" href="index.html"><b data-i18n="brand"></b> <span data-i18n="brandSub"></span></a>
+    <nav class="nav"><a href="index.html" aria-current="page" data-i18n="navBoard"></a><a href="method.html" data-i18n="navMethod"></a><a href="https://github.com/jhste102lab/jhste-llm-bench" data-i18n="navGithub"></a></nav>
+  </div></header>
+
+  <main class="wrap">
+    <div class="roles" id="roles" role="tablist"></div>
+    <div class="bar" id="bar"></div>
+    <section id="view"></section>
+    <footer class="foot"><span id="foot-meta"></span><a href="method.html" data-i18n="footMethod"></a></footer>
+  </main>
+
+  <div class="scrim" id="scrim"></div>
+  <aside class="drawer" id="drawer">
+    <button class="d-close" data-i18n-label="close">×</button>
+    <div id="drawer-body"></div>
+  </aside>
+
+  <script src="i18n/ko.js"></script>
+  <script src="data/bench.js"></script>
+  <script src="data/v2.js"></script>
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

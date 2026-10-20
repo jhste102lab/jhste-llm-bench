@@ -1,0 +1,1 @@
+{"rubric_version":"scout-checklist-1","items":[{"id":"f1","kind":"file","path":"apps/web/src/policy.ts","why":"entry point"},{"id":"y1","kind":"symbol","name":"buildPolicy","why":"reusable policy"},{"id":"b1","kind":"fact","statement":"The policy lives in a shared package.","critical":false},{"id":"b2","kind":"fact","statement":"Writes happen at import time.","critical":true}]}
