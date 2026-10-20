@@ -1,0 +1,10 @@
+{"type":"title","v":1,"title":""}
+{"type":"session","version":3,"id":"fixture-head","timestamp":"2026-10-20T06:57:15.570Z","cwd":"/tmp/bench-fixture/repo"}
+{"type":"model_change","model":"openai-codex/gpt-6.1-sol","resolvedModelIsFallback":false,"timestamp":"2026-10-20T06:57:15.727Z"}
+{"type":"thinking_level_change","thinkingLevel":"high","timestamp":"2026-10-20T06:57:15.727Z"}
+{"type":"message","timestamp":"2026-10-20T06:57:15.896Z","message":{"role":"user","content":[{"type":"text","text":"delegate"}],"timestamp":1792479435896}}
+{"type":"message","timestamp":"2026-10-20T06:57:17.822Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"head-1","name":"task","arguments":{"i":"Delegating","context":"Goal: fixture context","tasks":[{"agent":"task","task":"Fixture task text"}]}}],"provider":"openai-codex","model":"gpt-6.1-sol","usage":{"input":100,"output":10,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.004}},"stopReason":"toolUse","timestamp":1792479437822}}
+{"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"head-1","toolName":"task","startedAt":"2026-10-20T06:57:17.825Z"},"timestamp":"2026-10-20T06:57:17.825Z"}
+{"type":"message","timestamp":"2026-10-20T06:57:19.654Z","message":{"role":"toolResult","toolCallId":"head-1","toolName":"task","content":[{"type":"text","text":"done"}],"isError":false,"timestamp":1792479439654}}
+{"type":"message","timestamp":"2026-10-20T06:57:20.911Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"provider":"openai-codex","model":"gpt-6.1-sol","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.001}},"stopReason":"stop","timestamp":1792479440911}}
+{"type":"custom","customType":"session_exit","data":{"reason":"dispose","kind":"normal"},"timestamp":"2026-10-20T06:57:20.915Z"}

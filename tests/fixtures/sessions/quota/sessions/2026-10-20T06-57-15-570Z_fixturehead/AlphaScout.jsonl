@@ -1,0 +1,8 @@
+{"type":"session","version":3,"id":"fixture-worker","timestamp":"2026-10-20T06:57:17.802Z","cwd":"/tmp/bench-fixture/repo","parentSession":"/tmp/bench-fixture/sessions/2026-10-20T06-57-15-570Z_fixturehead.jsonl"}
+{"type":"model_change","model":"anthropic/claude-haiku-5-5","resolvedModelIsFallback":true,"timestamp":"2026-10-20T06:57:17.831Z"}
+{"type":"thinking_level_change","thinkingLevel":"low","timestamp":"2026-10-20T06:57:17.831Z"}
+{"type":"session_init","task":"Fixture scout task","agent":"scout","resolvedModel":"anthropic/claude-haiku-5-5:low","timestamp":"2026-10-20T06:57:17.836Z"}
+{"type":"message","timestamp":"2026-10-20T06:57:20.000Z","message":{"role":"assistant","content":[],"provider":"openai-codex","model":"gpt-6.1-sol","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"cost":{"total":0}},"stopReason":"error","errorMessage":"Codex error event: The usage limit has been reached (code=usage_limit_reached)","timestamp":1792479440000}}
+{"type":"message","timestamp":"2026-10-20T06:57:25.000Z","message":{"role":"assistant","content":[],"provider":"openai-codex","model":"gpt-6.1-sol","usage":{"cost":{"total":0}},"stopReason":"aborted","errorMessage":"Deadline exceeded","timestamp":1792479445000}}
+{"type":"message","timestamp":"2026-10-20T06:57:30.000Z","message":{"role":"assistant","content":[],"provider":"openai-codex","model":"gpt-6.1-sol","usage":{"cost":{"total":0}},"stopReason":"error","errorMessage":"upstream connect error or disconnect/reset before headers","timestamp":1792479450000}}
+{"type":"custom","customType":"session_exit","data":{"reason":"error","kind":"error"},"timestamp":"2026-10-20T06:57:30.915Z"}

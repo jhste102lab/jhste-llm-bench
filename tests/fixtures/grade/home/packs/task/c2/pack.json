@@ -1,0 +1,1 @@
+{"id": "c2", "role": "task", "label": {"ko": "\ud658\uacbd \uc624\ub958 \uacfc\uc81c"}, "deps": "fixturedeps", "base_ref": "fixture", "source_repo": "fixture", "reference_ref": "fixture", "timeout_minutes": 1, "cases": 1, "critical": [], "baseline_passed": 0}

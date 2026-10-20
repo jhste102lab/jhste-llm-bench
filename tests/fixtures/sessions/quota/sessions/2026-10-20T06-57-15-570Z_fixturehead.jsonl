@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"fixture-head","timestamp":"2026-10-20T06:57:15.570Z","cwd":"/tmp/bench-fixture/repo"}
+{"type":"message","timestamp":"2026-10-20T06:57:17.822Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"head-1","name":"task","arguments":{"context":"Goal: fixture context","tasks":[{"agent":"scout","task":"Fixture scout task"}]}}],"provider":"openai-codex","model":"gpt-6.1-sol","usage":{"cost":{"total":0.002}},"stopReason":"toolUse","timestamp":1792479437822}}
+{"type":"message","timestamp":"2026-10-20T06:57:20.000Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"provider":"openai-codex","model":"gpt-6.1-sol","usage":{"cost":{"total":0.001}},"stopReason":"stop","timestamp":1792479440000}}
+{"type":"custom","customType":"session_exit","data":{"reason":"dispose","kind":"normal"},"timestamp":"2026-10-20T06:57:20.915Z"}

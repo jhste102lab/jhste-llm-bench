@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"fixture-head","timestamp":"2026-10-20T06:57:15.570Z","cwd":"/tmp/bench-fixture/repo"}
+{"type":"model_change","model":"openai-codex/gpt-6.1-sol","resolvedModelIsFallback":false,"timestamp":"2026-10-20T06:57:15.727Z"}
+{"type":"message","timestamp":"2026-10-20T06:57:17.822Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"head-1","name":"task","arguments":{"context":"Goal: fixture","tasks":[{"agent":"task","task":"Fixture task"}]}}],"provider":"openai-codex","model":"gpt-6.1-sol","usage":{"cost":{"total":0.001}},"stopReason":"toolUse","timestamp":1792479437822}}
+{"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"head-1","toolName":"task","startedAt":"2026-10-20T06:57:17.825Z","args":{"context":"Goal: fixture"}},"timestamp":"2026-10-20T06:57:17.825Z"}
+{"type":"message","timestamp":"2026-10-20T06:57:19.654Z","message":{"role":"toolResult","toolCallId":"head-1","toolName":"task","content":[{"type":"text","text":"done"}],"isError":false,"timestamp":1792479439654}}
+{"type":"custom","customType":"session_exit","data":{"reason":"dispose","kind":"normal"},"timestamp":"2026-10-20T06:57:20.915Z"}
