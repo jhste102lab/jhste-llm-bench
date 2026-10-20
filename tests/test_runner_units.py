@@ -281,7 +281,8 @@ class OmpTest(unittest.TestCase):
         prompt = omp.replay_prompt("task", frozen)
         payload = json.loads(prompt.split("```json")[1].split("```")[0])
         self.assertEqual(payload["context"], "ctx")
-        self.assertEqual(payload["tasks"], [{"agent": "task", "task": "do the thing"}])
+        self.assertEqual(payload["tasks"], [{"agent": "task", "task": "do the thing",
+                                             "solutionSpace": omp.SOLUTION_SPACE}])
         freeze = omp.freeze_prompt("scout", "explore the repository")
         self.assertIn("explore the repository", freeze)
         self.assertIn('agent "scout"', freeze)

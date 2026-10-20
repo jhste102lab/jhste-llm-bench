@@ -195,6 +195,9 @@ def _delegation_check(head: dict, frozen: dict) -> tuple[bool, str]:
     for field in pack_mod.DELEGATION_FIELDS:
         if found.get(field) != frozen.get(field):
             return False, f"delegation {field} differs from the frozen arguments"
+    # Omitted is tolerated (omp accepts it); any other value would differ per head.
+    if found.get("solution_space") not in (None, omp_mod.SOLUTION_SPACE):
+        return False, "delegation solutionSpace differs from the replay value"
     return True, ""
 
 
