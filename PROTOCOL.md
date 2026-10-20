@@ -51,7 +51,7 @@ Every tool call of the head and the worker is audited after the run.
 - An access that the sandbox denied is a **blocked attempt**. It is counted in the detail view and does not affect ranking.
 - An access to forbidden material that succeeded (answer code, earlier sessions, other runs, evaluator material, credentials, the production site, the private repository on GitHub) marks the row as **answer access**. The score is still recorded and published, together with the access categories. The row gets no rank number and is listed below the ranked rows.
 - Runs are never invalidated or rerun because of contamination. A run whose audit did not complete is not published.
-- The head may only make the single frozen task call (plus `todo`). Any other head tool call, a second worker, or a model/effort override in the call makes the run `invalid`.
+- The head may only make the single frozen task call (plus `todo`), with one fixed `solutionSpace` text shared by every run. Any other head tool call, a second worker, a different `solutionSpace`, any other added field, or a model/effort override in the call makes the run `invalid`.
 
 Known limits: network access is open (web search and fetch are allowed), so domain rules are enforced by the audit, not the sandbox. The omp credential store must stay readable for omp itself, so worker tools could read it; this is the same exposure as everyday use and is not a scoring path. Session files are written by the omp process the worker runs in, so a deliberately adversarial worker could alter its own evidence; the benchmark assumes cooperative models and the audit, oracle and identity checks would have to be fooled together.
 

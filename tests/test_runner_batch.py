@@ -14,7 +14,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fake_bench  # noqa: E402
 from bench import home as home_mod
-from bench import manifest, run as run_mod
+from bench import manifest, omp, run as run_mod
 
 MODEL = "test/model-a"
 EFFORT = "high"
@@ -211,7 +211,7 @@ class BatchRunnerTest(unittest.TestCase):
         result = self.start()
         self.assertEqual(set(self.outcomes(result).values()), {"completed"})
 
-        for scenario in ("head-bash", "two-tasks", "task-extra"):
+        for scenario in ("head-bash", "two-tasks", "task-extra", "solution-space"):
             os.environ["FAKE_BENCH_SCENARIO"] = scenario
             result = self.start(use_baseline=False)
             self.assertEqual(set(self.outcomes(result).values()), {"invalid"}, scenario)
@@ -321,6 +321,13 @@ class BatchRunnerTest(unittest.TestCase):
         extra_field = self.summary()
         extra_field["head"]["delegations"][0]["extra_fields"] = ["model"]
         self.assertEqual(run_mod.classify(extra_field, {}, MODEL, frozen)[0], "invalid")
+
+        replayed = self.summary()
+        replayed["head"]["delegations"][0]["solution_space"] = omp.SOLUTION_SPACE
+        self.assertEqual(run_mod.classify(replayed, {}, MODEL, frozen)[0], "completed")
+        varied = self.summary()
+        varied["head"]["delegations"][0]["solution_space"] = "head's own reading"
+        self.assertEqual(run_mod.classify(varied, {}, MODEL, frozen)[0], "invalid")
 
     def test_no_worker_session_is_setup_error(self) -> None:
         outcome, detail = run_mod.classify(self.summary(worker=None), {"timed_out": False},

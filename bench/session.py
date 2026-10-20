@@ -176,16 +176,17 @@ def _delegations(calls: list[dict]) -> list[dict]:
         tasks = arguments.get("tasks")
         if isinstance(tasks, list):
             entry = tasks[0] if tasks and isinstance(tasks[0], dict) else {}
-            allowed = {"agent", "task", "name", "i"}
+            allowed = {"agent", "task", "name", "i", "solutionSpace"}
             count = len(tasks)
         else:
             entry = arguments
-            allowed = {"agent", "task", "name", "i", "context"}
+            allowed = {"agent", "task", "name", "i", "context", "solutionSpace"}
             count = 1
         delegations.append({
             "agent": entry.get("agent", agent),
             "context": arguments.get("context"),
             "task": entry.get("task", task),
+            "solution_space": entry.get("solutionSpace"),
             "tasks_count": count,
             "extra_fields": sorted(set(entry) - allowed),
         })

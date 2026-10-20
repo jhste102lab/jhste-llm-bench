@@ -45,6 +45,7 @@ with open(prompt_path, encoding="utf-8") as handle:
     prompt = handle.read()
 
 delegation = dict(agent="task", context="freeze context", task="freeze assignment")
+entry = {"agent": "task", "task": "freeze assignment"}
 match = re.search(r"```json\n(.*?)\n```", prompt, re.S)
 if match:
     payload = json.loads(match.group(1))
@@ -96,11 +97,13 @@ def write(path, entries):
             handle.write(json.dumps(entry) + "\n")
 
 task_args = {"i": "Delegating", "context": delegation["context"],
-             "tasks": [{"agent": delegation["agent"], "task": delegation["task"]}]}
+             "tasks": [dict(entry, agent=delegation["agent"], task=delegation["task"])]}
 if scenario == "two-tasks":
     task_args["tasks"].append(dict(task_args["tasks"][0]))
 if scenario == "task-extra":
     task_args["tasks"][0]["model"] = "annex/override:low"
+if scenario == "solution-space":
+    task_args["tasks"][0]["solutionSpace"] = "head's own reading of the task"
 
 head_entries = [
     {"type": "session", "version": 3, "id": uuid.uuid4().hex, "timestamp": stamp, "cwd": cwd},
@@ -198,16 +201,17 @@ def summarize(run_dir, protocol):  # noqa: ARG001 - contract signature
             tasks = args.get("tasks")
             if isinstance(tasks, list):
                 entry_task = tasks[0] if tasks and isinstance(tasks[0], dict) else {}
-                allowed = {"agent", "task", "name", "i"}
+                allowed = {"agent", "task", "name", "i", "solutionSpace"}
                 count = len(tasks)
             else:
                 entry_task = args
-                allowed = {"agent", "task", "name", "i", "context"}
+                allowed = {"agent", "task", "name", "i", "context", "solutionSpace"}
                 count = 1
             delegations.append({
                 "agent": entry_task.get("agent"),
                 "context": args.get("context"),
                 "task": entry_task.get("task"),
+                "solution_space": entry_task.get("solutionSpace"),
                 "tasks_count": count,
                 "extra_fields": sorted(set(entry_task) - allowed),
             })

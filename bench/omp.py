@@ -83,11 +83,17 @@ def overlay_text(role: str, model: str, effort: str, protocol: dict,
     )
 
 
+# The task schema requires `solutionSpace`; every replay passes this one value so
+# heads cannot vary it (it only feeds omp's auto-thinking, which explicit efforts bypass).
+SOLUTION_SPACE = "Fixed benchmark assignment; the approach is for the worker to determine."
+
+
 def replay_prompt(role: str, delegation: dict) -> str:
     payload = {
         "i": "Delegating the frozen benchmark assignment",
         "context": delegation["context"],
-        "tasks": [{"agent": delegation["agent"], "task": delegation["task"]}],
+        "tasks": [{"agent": delegation["agent"], "task": delegation["task"],
+                   "solutionSpace": SOLUTION_SPACE}],
     }
     return f"""Benchmark turn. Do not read the repository, do not implement anything and do not explore.
 
@@ -97,7 +103,7 @@ Call the `task` tool exactly once, with exactly these arguments (JSON), then sto
 {json.dumps(payload, ensure_ascii=False, indent=2)}
 ```
 
-Use the values verbatim: same `context`, one entry in `tasks` with the same `agent` and the same `task` text. Do not shorten, extend or rephrase them, do not add a model override, and do not call any other tool in this turn.
+Use the values verbatim: same `context`, one entry in `tasks` with the same `agent`, `task` and `solutionSpace` text. Do not shorten, extend or rephrase them, do not add other fields or a model override, and do not call any other tool in this turn.
 
 After the task tool returns, reply with one short line and stop."""
 

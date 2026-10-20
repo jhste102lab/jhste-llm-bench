@@ -77,7 +77,8 @@ class SessionSummaryTest(unittest.TestCase):
         self.assertAlmostEqual(summary["head"]["cost_usd"], 0.005, places=8)
         self.assertEqual(summary["head"]["delegations"], [{
             "agent": "task", "context": "Goal: fixture context",
-            "task": "Fixture task text", "tasks_count": 1, "extra_fields": []}])
+            "task": "Fixture task text", "solution_space": None, "tasks_count": 1,
+            "extra_fields": []}])
         self.assertEqual(summary["head"]["tool_calls"], [{"name": "task"}])
         self.assertIsNone(summary["head"]["error"])
 
