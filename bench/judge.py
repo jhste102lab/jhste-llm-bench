@@ -12,6 +12,8 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 RUBRIC_VERSION = "scout-judge-1"
 
@@ -70,18 +72,50 @@ def _binary() -> str:
         return shutil.which("omp") or "omp"
 
 
+def _observed_models(stdout: str) -> set[str]:
+    """``provider/model`` of every assistant event in an ``omp --mode json`` stream."""
+    seen: set[str] = set()
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        message = event.get("message") if isinstance(event, dict) else None
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        provider, name = message.get("provider"), message.get("model")
+        if provider and name:
+            seen.add(f"{provider}/{name}")
+    return seen
+
+
+FALLBACK_OFF = ("retry: {modelFallback: false, usageAwareFallback: false, "
+                "fallbackChains: {}}\n")
+
+
 def _run_omp(prompt: str, model: str, effort: str) -> str:
-    cmd = [_binary(), "-p", "--mode", "json", "--no-tools", "--no-session",
-           "--no-extensions", "--no-skills", "--no-rules",
-           "--model", model, "--thinking", effort]
-    try:
-        proc = subprocess.run(cmd, input=prompt, text=True, capture_output=True,
-                              timeout=600)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise RuntimeError(f"judge process failed: {error}") from error
+    with tempfile.TemporaryDirectory(prefix="bench-judge-") as scratch:
+        overlay = Path(scratch) / "overlay.yml"
+        overlay.write_text(FALLBACK_OFF, encoding="utf-8")
+        cmd = [_binary(), "-p", "--mode", "json", "--no-tools", "--no-session",
+               "--no-extensions", "--no-skills", "--no-rules",
+               "--config", str(overlay),
+               "--model", model, "--thinking", effort]
+        try:
+            proc = subprocess.run(cmd, input=prompt, text=True,
+                                  capture_output=True, timeout=600)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError(f"judge process failed: {error}") from error
     if proc.returncode != 0:
         tail = (proc.stderr or "").strip()[-800:]
         raise RuntimeError(f"judge exited {proc.returncode}: {tail}")
+    observed = _observed_models(proc.stdout)
+    if observed != {model}:
+        raise RuntimeError(
+            f"judge model mismatch: requested {model}, observed {sorted(observed)}")
     return proc.stdout
 
 

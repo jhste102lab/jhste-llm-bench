@@ -174,15 +174,37 @@ def _delegations(calls: list[dict]) -> list[dict]:
         agent = arguments.get("agent")
         task = arguments.get("task")
         tasks = arguments.get("tasks")
-        if isinstance(tasks, list) and tasks and isinstance(tasks[0], dict):
-            agent = tasks[0].get("agent", agent)
-            task = tasks[0].get("task", task)
+        if isinstance(tasks, list):
+            entry = tasks[0] if tasks and isinstance(tasks[0], dict) else {}
+            allowed = {"agent", "task", "name", "i"}
+            count = len(tasks)
+        else:
+            entry = arguments
+            allowed = {"agent", "task", "name", "i", "context"}
+            count = 1
         delegations.append({
-            "agent": agent,
+            "agent": entry.get("agent", agent),
             "context": arguments.get("context"),
-            "task": task,
+            "task": entry.get("task", task),
+            "tasks_count": count,
+            "extra_fields": sorted(set(entry) - allowed),
         })
     return delegations
+
+
+def _task_results(records: list[dict]) -> dict[str, dict]:
+    """Head task-tool results keyed by subagent id (its session file stem)."""
+    results: dict[str, dict] = {}
+    for record in records:
+        if record.get("type") not in MESSAGE_TYPES:
+            continue
+        message = record.get("message") or {}
+        if message.get("role") != "toolResult" or message.get("toolName") != "task":
+            continue
+        for result in (message.get("details") or {}).get("results") or []:
+            if isinstance(result, dict) and isinstance(result.get("id"), str):
+                results[result["id"]] = result
+    return results
 
 
 def _assistant_messages(records: list[dict]) -> list[dict]:
@@ -198,7 +220,8 @@ def _assistant_messages(records: list[dict]) -> list[dict]:
 
 def _head_block(sessions: Path, head: Path | None, records: list[dict]) -> dict:
     if head is None:
-        return {"session": None, "cost_usd": 0.0, "delegations": [], "error": None}
+        return {"session": None, "cost_usd": 0.0, "tool_calls": [],
+                "delegations": [], "error": None}
     cost = 0.0
     error = None
     for message in _assistant_messages(records):
@@ -206,10 +229,12 @@ def _head_block(sessions: Path, head: Path | None, records: list[dict]) -> dict:
         cost += float((usage.get("cost") or {}).get("total") or 0.0)
         if message.get("errorMessage") or message.get("stopReason") in ("error", "aborted"):
             error = message.get("errorMessage") or message.get("stopReason")
+    calls = _tool_calls(records)
     return {
         "session": str(head.relative_to(sessions.parent)),
         "cost_usd": round(cost, 8),
-        "delegations": _delegations(_tool_calls(records)),
+        "tool_calls": [{"name": call["name"]} for call in calls],
+        "delegations": _delegations(calls),
         "error": error,
     }
 
@@ -334,12 +359,14 @@ def _nested_records(worker_path: Path) -> list[dict]:
     return records
 
 
-def _worker_block(run_dir: Path, path: Path, protocol: dict) -> dict:
+def _worker_block(run_dir: Path, path: Path, protocol: dict,
+                  task_result: dict | None = None) -> dict:
     records = _worker_records(path)
     init = _session_init(records)
     assistants = _assistant_messages(records)
+    task_result = task_result or {}
 
-    resolved_model = init.get("resolvedModel")
+    resolved_model = init.get("resolvedModel") or task_result.get("resolvedModel")
     agent = init.get("agent")
     fallback = False
     thinking_level = None
@@ -361,6 +388,7 @@ def _worker_block(run_dir: Path, path: Path, protocol: dict) -> dict:
     errors: list[dict] = []
     final_text = ""
     last_stop = None
+    terminal_error = None
 
     for message in assistants:
         duration = message.get("duration")
@@ -380,7 +408,19 @@ def _worker_block(run_dir: Path, path: Path, protocol: dict) -> dict:
         last_stop = message.get("stopReason")
         if message.get("errorMessage") or last_stop in ("error", "aborted"):
             detail = message.get("errorMessage") or str(last_stop)
-            errors.append({"kind": classify_error(detail), "message": detail})
+            error = {"kind": classify_error(detail), "message": detail}
+            errors.append(error)
+            terminal_error = error
+        else:
+            # A later successful turn recovers every earlier failed request.
+            terminal_error = None
+
+    runtime_reason = str(task_result.get("abortReason") or "")
+    runtime_aborted = bool(task_result.get("aborted")) and (
+        "runtime limit" in runtime_reason.lower()
+        or "maxtimems" in runtime_reason.lower())
+    if runtime_aborted:
+        terminal_error = {"kind": "timeout", "message": runtime_reason}
 
     nested = _nested_records(path)
     if nested:
@@ -403,7 +443,8 @@ def _worker_block(run_dir: Path, path: Path, protocol: dict) -> dict:
     if stamps:
         wall_seconds = (max(stamps) - min(stamps)) / 1000.0
 
-    completed = bool(exit_kind is None or exit_kind == "normal") and not errors and last_stop in (None, "stop")
+    completed = (bool(exit_kind is None or exit_kind == "normal")
+                 and terminal_error is None and last_stop in (None, "stop"))
 
     return {
         "session": str(path.relative_to(run_dir)),
@@ -421,6 +462,8 @@ def _worker_block(run_dir: Path, path: Path, protocol: dict) -> dict:
         "tokens": tokens,
         "web": web,
         "errors": errors,
+        "terminal_error": terminal_error,
+        "runtime_aborted": runtime_aborted,
         "final_text": final_text,
         "completed": completed,
     }
@@ -463,6 +506,7 @@ def summarize(run_dir: Path, protocol: dict) -> dict:
             matched = [p for p in workers if _session_init(read_records(p)).get("agent") == expected]
             if matched:
                 chosen = matched[0]
-        worker = _worker_block(run_dir, chosen, protocol or {})
+        results = _task_results(head_records)
+        worker = _worker_block(run_dir, chosen, protocol or {}, results.get(chosen.stem))
 
     return {"head": head_block, "worker": worker}

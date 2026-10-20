@@ -60,6 +60,21 @@ def _grades(home: Path) -> dict[str, dict]:
     return index
 
 
+def _audited(run_dir: Path, run: dict) -> bool:
+    """A run is publishable only when its audit completed successfully.
+
+    Absent or unreadable ``audit.json`` is not evidence of a clean run, and an
+    audit failure leaves a marker in ``outcome_detail`` (the result is kept,
+    but the row must not be ranked).
+    """
+    if "audit failed" in str(run.get("outcome_detail") or "").lower():
+        return False
+    audit = _read_json(Path(run_dir) / "audit.json")
+    return (isinstance(audit, dict)
+            and isinstance(audit.get("contaminated"), bool)
+            and isinstance(audit.get("accessed"), list))
+
+
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
@@ -84,7 +99,7 @@ def _attempt_payload(run_dir: Path, grade: dict) -> dict:
 
 
 def _row(key: str, model: str, effort: str, attempts: list[dict],
-         small_diff_pp: float) -> dict:
+         small_diff_pp: float, cohort_packs: set[str] | None = None) -> dict:
     by_pack: dict[str, list[dict]] = {}
     for attempt in attempts:
         by_pack.setdefault(attempt["grade"]["pack"], []).append(attempt)
@@ -119,6 +134,8 @@ def _row(key: str, model: str, effort: str, attempts: list[dict],
 
     if not pack_scores:
         return {}
+
+    missing = sorted(p for p in (cohort_packs or set()) if p not in by_pack)
 
     scored = [e for e in attempts if e["grade"].get("score") is not None]
     counts = [len([e for e in entries if e["grade"].get("score") is not None])
@@ -158,6 +175,7 @@ def _row(key: str, model: str, effort: str, attempts: list[dict],
         "flags": {
             "contaminated": any(e["contaminated"] for e in scored),
             "critical": any(e["grade"].get("critical") for e in scored),
+            "incomplete": bool(missing),
             "close": False,
         },
         "detail": detail,
@@ -170,10 +188,14 @@ def _num_score(grade: dict):
     return None if score is None else float(score)
 
 
+def _ranked(row: dict) -> bool:
+    return not (row["flags"]["contaminated"] or row["flags"]["incomplete"])
+
+
 def _mark_close(rows: list[dict], small_diff_pp: float) -> None:
     previous = None
     for row in rows:
-        if row["flags"]["contaminated"]:
+        if not _ranked(row):
             continue
         if previous is not None:
             row["flags"]["close"] = (
@@ -199,6 +221,8 @@ def cohorts(home: Path, protocol: dict) -> list[dict]:
             continue
         batch = _read_json(run_dir.parent / "batch.json") or {}
         if batch.get("quarantined"):
+            continue
+        if not _audited(run_dir, run):
             continue
         run_grades = grades.get(run.get("run_id") or run_dir.name)
         if not run_grades:
@@ -235,18 +259,20 @@ def cohorts(home: Path, protocol: dict) -> list[dict]:
 
     result = []
     for cohort in grouped.values():
+        packs = {p for p in cohort["packs"] if p}
         rows = []
         for key, attempts in cohort["rows"].items():
             config = attempts[0]["config"]
-            row = _row(key, config.get("model") or key, config.get("effort") or "", attempts, small_diff)
+            row = _row(key, config.get("model") or key, config.get("effort") or "",
+                       attempts, small_diff, packs)
             if row:
                 rows.append(row)
-        rows.sort(key=lambda r: (r["flags"]["contaminated"],
+        rows.sort(key=lambda r: (not _ranked(r),
                                  -r["values"]["score"], r["values"]["cost"]))
         _mark_close(rows, small_diff)
         for row in rows:
             row.pop("_pack_scores", None)
-        cohort["packs"] = sorted(p for p in cohort["packs"] if p)
+        cohort["packs"] = sorted(packs)
         cohort["rows"] = rows
         result.append(cohort)
 

@@ -11,7 +11,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from .sandbox import launch_env
+from .sandbox import launch_env, wrap
 
 BUNDLED_AGENTS = ["task", "scout", "sonic", "designer", "librarian",
                   "security-reviewer", "bulk", "reviewer", "seance"]
@@ -124,9 +124,7 @@ def build_command(run_dir: Path, protocol: dict, head: dict,
                   timeout_minutes: int | None = None) -> list[str]:
     run_dir = Path(run_dir)
     timeout = timeout_minutes or protocol["head_timeout_minutes"]
-    return [
-        "sandbox-exec", "-f", str(run_dir / "sandbox.sb"),
-        "env", "-u", "GITHUB_TOKEN", "-u", "GH_TOKEN",
+    return wrap([
         binary(), "-p", "--mode", "json", "--no-title", "--no-prewalk",
         "--auto-approve", "--no-extensions", "--no-skills", "--no-rules",
         "--no-lsp", "--no-pty",
@@ -137,7 +135,7 @@ def build_command(run_dir: Path, protocol: dict, head: dict,
         "--thinking", head["effort"],
         "--max-time", f"{int(timeout)}m",
         f"@{run_dir / 'prompt.md'}",
-    ]
+    ], run_dir / "sandbox.sb")
 
 
 def launch(run_dir: Path, protocol: dict, head: dict,

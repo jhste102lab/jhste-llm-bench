@@ -42,7 +42,7 @@ class Home:
     def run(self, batch: str, run_id: str, role: str, pack: str, model: str,
             effort: str, *, contaminated=False, model_seconds=60.0,
             tool_seconds=40.0, cost=0.1, concurrency=4, web=1, blocked=0,
-            access=None, outcome="completed"):
+            access=None, outcome="completed", audit=True):
         base = self.root / "runs" / batch / run_id
         write(base / "run.json", {
             "run_id": run_id, "batch_id": batch, "protocol": "v2", "role": role,
@@ -54,9 +54,10 @@ class Home:
         write(base / "summary.json", {"worker": {
             "model_seconds": model_seconds, "tool_seconds": tool_seconds,
             "cost_usd": cost, "web": {"searches": web, "fetches": 0}}})
-        write(base / "audit.json", {
-            "blocked": blocked, "contaminated": contaminated,
-            "accessed": access or []})
+        if audit:
+            write(base / "audit.json", {
+                "blocked": blocked, "contaminated": contaminated,
+                "accessed": access or []})
 
     def grade(self, run_id: str, role: str, pack: str, passed: int, total: int,
               *, critical=False, judge=None, score=None, baseline_passed=0):
@@ -85,6 +86,7 @@ class AggregateTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.home = Path(self.tmp.name) / "home"
         bench = Home(self.home)
+        write(self.home / "private.json", {"private_terms": ["fixtureterm"]})
         bench.pack("task", "c1", "과제 하나")
         bench.pack("task", "c2", "과제 둘")
         bench.pack("scout", "s1", "탐색 하나")
@@ -170,6 +172,59 @@ class AggregateTest(unittest.TestCase):
         scout = [c for c in cohorts(self.home, PROTOCOL) if c["role"] == "scout"]
         self.assertEqual([c["judge"] for c in scout], [OPUS, "anthropic/claude-sonnet-5-5"])
         self.assertEqual([c["rows"][0]["values"]["score"] for c in scout], [75.0, 50.0])
+
+    def test_incomplete_coverage_never_ranks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            bench = Home(home)
+            bench.pack("task", "c1", "one")
+            bench.pack("task", "c2", "two")
+            bench.batch("b1")
+            # sol loses its c2 audit: only c1 may count, coverage is incomplete.
+            bench.run("b1", "r-sol-c1", "task", "c1", SOL, "high")
+            bench.run("b1", "r-sol-c2", "task", "c2", SOL, "high", audit=False)
+            bench.grade("r-sol-c1", "task", "c1", 8, 10, baseline_passed=1)
+            bench.grade("r-sol-c2", "task", "c2", 9, 10, baseline_passed=1)
+            bench.run("b1", "r-opus-c1", "task", "c1", OPUS, "medium")
+            bench.run("b1", "r-opus-c2", "task", "c2", OPUS, "medium")
+            bench.grade("r-opus-c1", "task", "c1", 5, 10, baseline_passed=1)
+            bench.grade("r-opus-c2", "task", "c2", 6, 10, baseline_passed=1)
+
+            rows = cohorts(home, PROTOCOL)[0]["rows"]
+            self.assertEqual([r["key"] for r in rows],
+                             [f"{OPUS}:medium", f"{SOL}:high"])
+            self.assertFalse(rows[0]["flags"]["incomplete"])
+            self.assertTrue(rows[1]["flags"]["incomplete"])
+            # Mean over its present pack only; the missing pack stays missing.
+            self.assertEqual(rows[1]["values"]["score"], 77.8)
+            self.assertEqual(sorted(rows[1]["tasks"]), ["c1"])
+            self.assertFalse(rows[0]["flags"]["close"])
+
+            from bench.aggregate import _audited
+            bad = home / "runs" / "b1" / "r-sol-c1"
+            write(bad / "run.json", {
+                "run_id": "r-sol-c1", "batch_id": "b1", "protocol": "v2",
+                "role": "task", "pack": "c1", "outcome": "completed",
+                "outcome_detail": "completed; audit failed: OSError: nope",
+                "config": {"key": f"{SOL}:high", "model": SOL, "effort": "high"},
+            })
+            self.assertFalse(_audited(bad, json.loads((bad / "run.json").read_text())))
+
+    def test_export_requires_private_terms_for_data(self):
+        docs = Path(self.tmp.name) / "docs-terms"
+        target = docs / "data" / "v2.js"
+        write(target, "old\n")
+        (self.home / "private.json").unlink()
+        with self.assertRaises(RuntimeError):
+            export(self.home, docs, PROTOCOL)
+        self.assertEqual(target.read_text(), "old\n")
+        write(self.home / "private.json", {"private_terms": []})
+        with self.assertRaises(RuntimeError):
+            export(self.home, docs, PROTOCOL)
+        # Empty-site export stays allowed without private terms.
+        empty = Path(self.tmp.name) / "empty-terms"
+        empty.mkdir()
+        self.assertTrue(export(empty, Path(self.tmp.name) / "docs3", PROTOCOL).is_file())
 
     def test_export_allowlist_and_empty_state(self):
         docs = Path(self.tmp.name) / "docs"

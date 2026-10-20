@@ -58,6 +58,41 @@ def _link_deps(repo: Path, node_modules: Path | None) -> None:
     link_deps(repo, node_modules)
 
 
+def _deps_dir(home: Path, pack: dict) -> Path | None:
+    name = pack.get("deps")
+    if not name:
+        return None
+    return Path(home) / "deps" / str(name)
+
+
+def _rules(home: Path, run_dir: Path) -> list[dict]:
+    """Indirection: tests grade without reading a private home."""
+    from .home import load_private
+    from .rules import forbidden_rules
+    return forbidden_rules(home, run_dir, load_private(home))
+
+
+def _grading_profile(home: Path, run_dir: Path, deps_dir: Path | None,
+                     pack_dir: Path, rules: list[dict]) -> str:
+    from .sandbox import grading_profile
+    return grading_profile(home, run_dir, deps_dir, pack_dir, rules)
+
+
+def _wrap(cmd: list[str], profile_path: Path) -> list[str]:
+    from .sandbox import wrap
+    return wrap(cmd, profile_path)
+
+
+def _sandboxed_oracle_cmd(home: Path, run_dir: Path, pack_dir: Path, pack: dict,
+                          cmd: list[str]) -> list[str]:
+    """Write ``run_dir/grade.sb`` and wrap the oracle command in it."""
+    profile_path = Path(run_dir) / "grade.sb"
+    profile = _grading_profile(home, run_dir, _deps_dir(home, pack), pack_dir,
+                               _rules(home, run_dir))
+    profile_path.write_text(profile, encoding="utf-8")
+    return _wrap(cmd, profile_path)
+
+
 def _append(home: Path, record: dict) -> None:
     path = Path(home) / "grades.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,8 +121,8 @@ def _score(passed: int, total: int):
 # task: oracle
 # --------------------------------------------------------------------------
 
-def _oracle(run_dir: Path, pack_dir: Path, pack: dict, protocol: dict,
-            node_modules: Path | None) -> dict:
+def _oracle(home: Path, run_dir: Path, pack_dir: Path, pack: dict,
+            protocol: dict, node_modules: Path | None) -> dict:
     repo = run_dir / "repo"
     setup_error = None
     if not repo.is_dir():
@@ -102,8 +137,13 @@ def _oracle(run_dir: Path, pack_dir: Path, pack: dict, protocol: dict,
     with tempfile.TemporaryDirectory(prefix="bench-oracle-") as scratch:
         out = Path(scratch) / "oracle.json"
         try:
-            proc = subprocess.run(["bash", str(script), str(repo), str(out)],
-                                  cwd=repo, capture_output=True, text=True,
+            cmd = _sandboxed_oracle_cmd(
+                home, run_dir, pack_dir, pack,
+                ["bash", str(script), str(repo), str(out)])
+        except Exception as error:  # noqa: BLE001 - no profile means no safe grade
+            return {"items": [], "setup_error": f"grading sandbox failed: {error}"}
+        try:
+            proc = subprocess.run(cmd, cwd=repo, capture_output=True, text=True,
                                   timeout=timeout)
         except subprocess.TimeoutExpired:
             return {"items": [], "setup_error": f"oracle timeout after {timeout}s"}
@@ -124,10 +164,13 @@ def _oracle(run_dir: Path, pack_dir: Path, pack: dict, protocol: dict,
     critical_ids = set(pack.get("critical") or [])
     items = []
     for case in payload["cases"]:
-        if not isinstance(case, dict):
-            continue
-        case_id = str(case.get("id"))
-        passed = bool(case.get("passed"))
+        # The oracle runs worker-controlled code: its JSON is untrusted.
+        if (not isinstance(case, dict) or not isinstance(case.get("id"), str)
+                or not case["id"] or not isinstance(case.get("passed"), bool)
+                or ("critical" in case and not isinstance(case["critical"], bool))):
+            return {"items": [], "setup_error": "oracle output malformed: bad case entry"}
+        case_id = case["id"]
+        passed = case["passed"]
         critical = bool(case.get("critical")) or case_id in critical_ids
         items.append({"id": case_id, "passed": passed, "critical": critical,
                       "verdict": "passed" if passed else "failed"})
@@ -140,15 +183,27 @@ def _oracle(run_dir: Path, pack_dir: Path, pack: dict, protocol: dict,
 # scout: checklist
 # --------------------------------------------------------------------------
 
-def _file_covered(path: str, report: str) -> bool:
+def _source_files(pack_dir: Path) -> list[str]:
+    root = Path(pack_dir) / "source"
+    if not root.is_dir():
+        return []
+    return [p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()]
+
+
+def _file_covered(path: str, report: str, source_files: list[str] = ()) -> bool:
     segments = [s for s in path.strip("/").split("/") if s]
     if not segments:
         return False
-    for size in range(min(2, len(segments)), len(segments) + 1):
+    if "/".join(segments) in report:
+        return True
+    # Shorter suffixes only count when they identify exactly one source file.
+    for size in range(min(2, len(segments)), len(segments)):
         suffix = "/".join(segments[-size:])
-        if suffix in report:
+        matches = [name for name in source_files
+                   if name == suffix or name.endswith("/" + suffix)]
+        if len(matches) == 1 and suffix in report:
             return True
-    return len(segments) == 1 and segments[0] in report
+    return False
 
 
 def _symbol_covered(name: str, report: str) -> bool:
@@ -158,7 +213,8 @@ def _symbol_covered(name: str, report: str) -> bool:
     return re.search(pattern, report) is not None
 
 
-def _checklist(report: str, checklist: dict, judge_cfg: dict) -> dict:
+def _checklist(report: str, checklist: dict, judge_cfg: dict,
+               source_files: list[str] = ()) -> dict:
     items = []
     facts = []
     for item in checklist.get("items") or []:
@@ -166,7 +222,8 @@ def _checklist(report: str, checklist: dict, judge_cfg: dict) -> dict:
             continue
         kind = item.get("kind")
         if kind == "file":
-            covered = _file_covered(str(item.get("path") or ""), report)
+            covered = _file_covered(str(item.get("path") or ""), report,
+                                    source_files)
             items.append({"id": item.get("id"), "passed": covered,
                           "critical": False,
                           "verdict": "covered" if covered else "missing"})
@@ -225,7 +282,7 @@ def grade_run(home: Path, run_dir: Path, protocol: dict,
         if "baseline_passed" not in pack:
             raise ValueError(f"pack {pack_id} lacks baseline_passed")
         baseline = int(pack["baseline_passed"])
-        result = _oracle(run_dir, pack_dir, pack, protocol,
+        result = _oracle(home, run_dir, pack_dir, pack, protocol,
                          _deps_node_modules(home, pack))
         items = result["items"]
         setup_error = result["setup_error"]
@@ -242,7 +299,8 @@ def grade_run(home: Path, run_dir: Path, protocol: dict,
             worker = summary.get("worker") or {}
             report = worker.get("final_text") or ""
             judge_cfg = judge or protocol.get("judge_default") or {}
-            judged = _checklist(report, checklist, judge_cfg)
+            judged = _checklist(report, checklist, judge_cfg,
+                                _source_files(pack_dir))
             items = judged["items"]
             judge_note = judged["judge"]
             critical = any(item["critical"] and item["verdict"] == "contradicted"

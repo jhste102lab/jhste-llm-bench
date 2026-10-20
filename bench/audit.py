@@ -31,47 +31,96 @@ _PUNCT = ".,;:!?)]}\"'`"
 # --------------------------------------------------------------------------
 
 def _calls(records: list[dict]) -> list[dict]:
+    """One entry per tool call, joining assistant arguments, start and result.
+
+    The harness records the authoritative arguments on the assistant
+    ``toolCall`` block; ``tool_execution_start`` is only a fallback for
+    sessions whose custom record happens to carry them.
+    """
     calls: dict[str, dict] = {}
     order: list[str] = []
+
+    def ensure(call_id: str, tool: str | None) -> dict:
+        if call_id not in calls:
+            calls[call_id] = {"id": call_id, "tool": tool, "args": {}, "result": None}
+            order.append(call_id)
+        elif tool and not calls[call_id]["tool"]:
+            calls[call_id]["tool"] = tool
+        return calls[call_id]
+
     for record in records:
-        if record.get("type") == "custom" and record.get("customType") == "tool_execution_start":
-            data = record.get("data") or {}
-            call_id = data.get("toolCallId")
-            if not call_id:
-                continue
-            if call_id not in calls:
-                calls[call_id] = {"id": call_id, "tool": data.get("toolName"),
-                                  "args": data.get("args") or {}, "result": None}
-                order.append(call_id)
-            else:
-                calls[call_id]["args"] = data.get("args") or calls[call_id]["args"]
-        elif record.get("type") == "message":
+        kind = record.get("type")
+        if kind == "message":
             message = record.get("message") or {}
-            if message.get("role") != "toolResult":
+            role = message.get("role")
+            if role == "assistant":
+                for block in message.get("content") or []:
+                    if not isinstance(block, dict) or block.get("type") != "toolCall":
+                        continue
+                    call_id = block.get("id") or block.get("toolCallId")
+                    if not call_id:
+                        continue
+                    call = ensure(call_id, block.get("name"))
+                    args = block.get("arguments") or block.get("args")
+                    if isinstance(args, dict) and args:
+                        call["args"] = args
+                continue
+            if role != "toolResult":
                 continue
             call_id = message.get("toolCallId")
             if not call_id:
                 continue
-            if call_id not in calls:
-                calls[call_id] = {"id": call_id, "tool": message.get("toolName"),
-                                  "args": {}, "result": None}
-                order.append(call_id)
-            calls[call_id]["result"] = message
+            ensure(call_id, message.get("toolName"))["result"] = message
+        elif kind == "custom" and record.get("customType") == "tool_execution_start":
+            data = record.get("data") or {}
+            call_id = data.get("toolCallId")
+            if not call_id:
+                continue
+            call = ensure(call_id, data.get("toolName"))
+            args = data.get("args")
+            if isinstance(args, dict) and args and not call["args"]:
+                call["args"] = args
     return [calls[cid] for cid in order]
 
 
-def _blocked(result: dict | None) -> bool:
+def _result_text(result: dict | None) -> str:
+    text = []
+    for block in (result or {}).get("content") or []:
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            text.append(block["text"])
+    return "\n".join(text)
+
+
+def _denied_line(text: str, targets: list[str]) -> bool:
+    """A denial marker on a line that names this specific target."""
+    for line in text.splitlines():
+        lowered = line.lower()
+        if not any(marker in lowered for marker in BLOCK_MARKERS):
+            continue
+        if any(target and target in line for target in targets):
+            return True
+    return False
+
+
+def _blocked(tool: str, kind: str, raw: str, target: str,
+             result: dict | None) -> bool:
+    """Whether one specific access was stopped by the sandbox.
+
+    Path tools report failure structurally (``isError``). Free-text tools only
+    count when the denial line names the target, so a worker cannot print
+    ``EPERM`` next to a successful access. Domains are never sandboxed (the
+    network is open), so a domain hit is blocked only when a read-tool URL
+    fetch failed.
+    """
     if result is None:
         # No result at all: the call never produced evidence of success.
         return True
-    if result.get("isError"):
-        return True
-    text = []
-    for block in result.get("content") or []:
-        if isinstance(block, dict) and isinstance(block.get("text"), str):
-            text.append(block["text"])
-    lowered = "\n".join(text).lower()
-    return any(marker in lowered for marker in BLOCK_MARKERS)
+    if kind == "url":
+        return bool(result.get("isError")) and tool in PATH_TOOLS
+    if tool in PATH_TOOLS:
+        return bool(result.get("isError"))
+    expanded = os.path.expanduser(raw) if isinstance(raw, str) else raw
+    return _denied_line(_result_text(result), [target, raw, expanded])
 
 
 # --------------------------------------------------------------------------
@@ -236,25 +285,30 @@ def audit(run_dir: Path, rules: list[dict]) -> dict:
     accessed: dict[str, int] = {}
 
     for call in _calls(records):
-        blocked = _blocked(call.get("result"))
+        tool = call.get("tool") or ""
         seen_categories: set[str] = set()
         for kind, value in _targets(call):
+            resolved = value
             if kind == "url":
                 matches = _domain_matches(value, rules)
                 target = value
             else:
                 resolved = _resolve(value, repo_dir)
                 if resolved.startswith(("http://", "https://")):
+                    kind = "url"
                     matches = _domain_matches(resolved, rules)
                 else:
                     matches = _path_matches(resolved, rules, allowed)
                 target = resolved
+            if not matches:
+                continue
+            blocked = _blocked(tool, kind, value, target, call.get("result"))
             for rule in matches:
                 category = rule.get("category") or "other"
                 if category in seen_categories:
                     continue
                 seen_categories.add(category)
-                events.append({"tool": call.get("tool"), "category": category,
+                events.append({"tool": tool, "category": category,
                                "blocked": blocked, "target": target})
                 if not blocked:
                     accessed[category] = accessed.get(category, 0) + 1

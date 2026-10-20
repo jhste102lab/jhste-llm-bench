@@ -44,6 +44,19 @@ def _is_generated(nm: Path) -> bool:
     return (nm / MARKER).is_file()
 
 
+def _clear_generated(path: Path, force: bool) -> None:
+    """Remove a bench-generated tree; refuse to delete a foreign install."""
+    path = Path(path)
+    if path.is_symlink():
+        path.unlink()
+        return
+    if not path.exists():
+        return
+    if not _is_generated(path) and not force:
+        raise RuntimeError(f"link_deps: {path} exists and is not bench-generated")
+    shutil.rmtree(path)
+
+
 def _link_tree(shared_nm: Path, target_nm: Path,
                workspace: dict[str, Path], warnings: list[str]) -> None:
     target_nm.mkdir(parents=True, exist_ok=True)
@@ -64,6 +77,8 @@ def _link_tree(shared_nm: Path, target_nm: Path,
                                                 target_is_directory=True)
             continue
         dest.symlink_to(entry.resolve(), target_is_directory=entry.is_dir())
+    (target_nm / MARKER).write_text(json.dumps(
+        {"shared": str(shared_nm), "generated": True}, indent=2) + "\n")
 
 
 def link_deps(repo: Path, shared_node_modules: Path, *, force: bool = False) -> dict:
@@ -77,13 +92,7 @@ def link_deps(repo: Path, shared_node_modules: Path, *, force: bool = False) -> 
 
     node_modules = repo / "node_modules"
     if node_modules.exists() or node_modules.is_symlink():
-        if not (node_modules.is_symlink() or _is_generated(node_modules)) and not force:
-            raise RuntimeError(
-                f"link_deps: {node_modules} exists and is not bench-generated")
-        if node_modules.is_symlink():
-            node_modules.unlink()
-        else:
-            shutil.rmtree(node_modules)
+        _clear_generated(node_modules, force)
 
     workspace = workspace_packages(repo)
     warnings: list[str] = []
@@ -100,8 +109,10 @@ def link_deps(repo: Path, shared_node_modules: Path, *, force: bool = False) -> 
             rel_path = Path(rel).relative_to(repo)
             shared_sub = shared_nm.parent / rel_path / "node_modules"
             if shared_sub.is_dir():
-                _link_tree(shared_sub, repo / rel_path / "node_modules",
-                           workspace, warnings)
+                nested_nm = repo / rel_path / "node_modules"
+                if nested_nm.exists() or nested_nm.is_symlink():
+                    _clear_generated(nested_nm, force)
+                _link_tree(shared_sub, nested_nm, workspace, warnings)
                 nested.append(str(rel_path / "node_modules"))
 
     resolved: dict[str, str] = {}

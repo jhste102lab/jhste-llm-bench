@@ -21,8 +21,8 @@ The frozen delegation is produced once per pack by running the head on the pack'
 
 - **Manifest.** `bench lock` hashes the protocol file, every pack file (request, delegation, source snapshot, oracle or checklist), the omp version and the dependency lockfile. `bench run` refuses to start if any hash drifted.
 - **Config overlay.** Each run gets its own omp overlay: model fallback off, fallback chains empty, prewalk/advisor/memory/async off, MCP, GitHub, computer, archive and other non-worker tools disabled. Web search and web fetch stay enabled because they are part of real coding work; the web-search model is pinned.
-- **Isolation.** The omp process runs under a macOS `sandbox-exec` profile that denies reading the contents of the original source checkout, all earlier experiment data and sessions, other runs, evaluator material, global agent instructions, MCP configuration and credential stores (file metadata stays readable so module resolution works; directory listings are denied). `GITHUB_TOKEN`/`GH_TOKEN` are removed from the environment and every run gets its own `TMPDIR`. The task source is a snapshot without git history or remotes. An isolation proof (denied, allowed and traversal probes) runs before every batch; a failing proof aborts the batch.
-- **Baseline.** Each role has a pinned baseline config. It is rerun in every batch. If the batch baseline score moves more than `baseline_drift_pp` from the previously accepted cohort, the batch is quarantined and excluded from publication until the owner accepts it (`bench accept`).
+- **Isolation.** The omp process runs under a macOS `sandbox-exec` profile that denies reading the contents of the original source checkout, all earlier experiment data and sessions (including database sidecar files), other runs, evaluator material, global agent instructions, MCP configuration and credential stores (file metadata stays readable so module resolution works; directory listings are denied). Writes to the bench home outside the run, to the shared dependency install and to source checkouts are denied. `GITHUB_TOKEN`/`GH_TOKEN` are removed from the environment and every run gets its own `TMPDIR`. The task source is a snapshot without git history or remotes. An isolation proof (read-deny, write-deny, allowed and traversal probes) runs before every batch; a failing proof aborts the batch.
+- **Baseline.** Each role has a pinned baseline config. It is rerun in every batch. If the batch baseline score moves more than `baseline_drift_pp` from the latest accepted batch of the same role, protocol and judge (compared on their common packs), the batch is quarantined and excluded from publication until the owner accepts it (`bench accept`).
 - **Rows.** One row is one model×effort config declared before the batch. Every attempt is kept.
 
 ## Run outcomes
@@ -37,10 +37,10 @@ The frozen delegation is produced once per pack by running the head on the pack'
 
 ## Scoring
 
-- **task:** a per-case oracle (behavioural tests run outside the sandbox after the worker stops). Every case is grounded in a sentence of the pack request. Pack score is the normalised gain over the untouched snapshot: `clamp((passed − baseline_passed) / (total − baseline_passed), 0, 1)`, so doing nothing scores 0 and breaking cases that already passed lowers the score. Raw counts are stored.
-- **scout:** a checklist per pack. File and symbol items are matched mechanically in the worker's report. Fact items are graded by a judge model that sees the report with model and vendor names scrubbed. The judge model, effort, rubric version and prompt hash are stored with every grade. Re-grades are appended and never overwrite.
+- **task:** a per-case oracle (behavioural tests run after the worker stops, under a grading sandbox with the worker's read denies except that pack's oracle, and the worker's write denies). Every case is grounded in a sentence of the pack request. Pack score is the normalised gain over the untouched snapshot: `clamp((passed − baseline_passed) / (total − baseline_passed), 0, 1)`, so doing nothing scores 0 and breaking cases that already passed lowers the score. Raw counts are stored.
+- **scout:** a checklist per pack. File items need the repository-relative path (a shorter suffix counts only when it is unique in the snapshot); symbol items need the identifier as a whole word. Fact items are graded by a judge model that sees the report with model and vendor names scrubbed; the judge runs without model fallback and its observed model must match the requested one. The judge model, effort, rubric version and prompt hash are stored with every grade. Re-grades are appended and never overwrite.
 - **Config score** = mean of pack scores, each pack weighted equally (raw counts are kept in the detail view).
-- **Ranking:** score (high first), then cost (low first). Time is shown but never ranked.
+- **Ranking:** score (high first), then cost (low first). Time is shown but never ranked. A row is ranked only when it has a scored, audited attempt on every pack of its cohort; otherwise it is shown as incomplete, without a rank, below the ranked rows.
 - **Small differences:** one attempt per config per pack by default. A row within `small_diff_pp` percentage points of the next-higher row is marked as a small difference. When a cohort is rerun, every config in it gets one more attempt.
 - **Critical defect:** a failed oracle case or contradicted checklist fact marked critical (security or permission leak, audit or data loss, private value disclosure) flags the row. It does not change the score.
 
@@ -50,12 +50,15 @@ Every tool call of the head and the worker is audited after the run.
 
 - An access that the sandbox denied is a **blocked attempt**. It is counted in the detail view and does not affect ranking.
 - An access to forbidden material that succeeded (answer code, earlier sessions, other runs, evaluator material, credentials, the production site, the private repository on GitHub) marks the row as **answer access**. The score is still recorded and published, together with the access categories. The row gets no rank number and is listed below the ranked rows.
-- Runs are never invalidated or rerun because of contamination.
+- Runs are never invalidated or rerun because of contamination. A run whose audit did not complete is not published.
+- The head may only make the single frozen task call (plus `todo`). Any other head tool call, a second worker, or a model/effort override in the call makes the run `invalid`.
+
+Known limits: network access is open (web search and fetch are allowed), so domain rules are enforced by the audit, not the sandbox. The omp credential store must stay readable for omp itself, so worker tools could read it; this is the same exposure as everyday use and is not a scoring path. Session files are written by the omp process the worker runs in, so a deliberately adversarial worker could alter its own evidence; the benchmark assumes cooperative models and the audit, oracle and identity checks would have to be fooled together.
 
 ## Metrics
 
 - **Cost:** API-equivalent USD of the worker session (sum of per-request recorded costs, including nested sessions), plus web-search tokens priced at the pinned web-model rates. This is not the subscription charge. Token classes are stored for repricing.
-- **Time:** worker session only, in minutes = model response time (sum of request durations) + tool execution time (union of tool-call intervals). Quota waits, retry backoff and idle time are excluded. Runs execute in parallel without a cap; parallel load can inflate tool time, so the detail view shows the model/tool split and the number of concurrent runs.
+- **Time:** worker session only, in minutes = model response time (sum of request durations) + tool execution time (union of tool-call intervals). Quota waits, retry backoff and idle time are excluded. Runs execute in parallel without a cap; parallel load can inflate tool time, so the detail view shows the model/tool split and the peak number of simultaneously running runs.
 - **Identity:** requested model and effort, resolved model, and observed models are stored separately. Effort is the requested and harness-applied value; whether the backend honoured it cannot be verified.
 
 ## Cohorts

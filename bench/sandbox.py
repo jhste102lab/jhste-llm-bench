@@ -29,14 +29,24 @@ def _inside(child: str, parent: str) -> bool:
     return child == parent or child.startswith(parent.rstrip("/") + "/")
 
 
-def build_profile(home: Path, run_dir: Path, deps_dir: Path | None,
-                  rules: list[dict]) -> str:
-    """SBPL text: allow everything, deny the forbidden paths (current run excepted).
+def _protected_write_trees(home_s: str, run_s: str, deps_s: str | None) -> list[str]:
+    """Trees the worker may not write: the bench home (minus the run), the
+    shared dependency install and the public checkout root."""
+    code = str(Path("~/code").expanduser().resolve())
+    deny: list[str] = []
+    if _inside(run_s, home_s):
+        deny.append(f"(deny file-write* (require-all (subpath {_quote(home_s)}) "
+                    f"(require-not (subpath {_quote(run_s)}))))")
+    else:
+        deny.append(f"(deny file-write* (subpath {_quote(home_s)}))")
+    for tree in (deps_s, code):
+        if tree:
+            deny.append(f"(deny file-write* (subpath {_quote(tree)}))")
+    return deny
 
-    Only file *contents* and directory listings are denied (`file-read-data`).
-    Metadata stays readable so realpath/lstat of ancestor directories works;
-    with `file-read*` node module resolution and vitest fail inside the run.
-    """
+
+def _render(home: Path, run_dir: Path, deps_dir: Path | None,
+            rules: list[dict], readable: list[Path] | None = None) -> str:
     home_s = str(Path(home).resolve())
     run_s = str(Path(run_dir).resolve())
     deps_s = str(Path(deps_dir).resolve()) if deps_dir else None
@@ -57,12 +67,42 @@ def build_profile(home: Path, run_dir: Path, deps_dir: Path | None,
     for rule in path_rules(rules):
         deny_path(rule["value"])
 
-    # Last match wins: traversal into the excepted subtrees stays readable.
-    for allowed in (run_s, deps_s):
+    # Re-allow the excepted subtrees. The allow must name the same operation as
+    # the denies: SBPL prefers the more specific `file-read-data` over `file-read*`
+    # regardless of order, so an `allow file-read*` would not override them.
+    for allowed in [run_s, deps_s] + [str(Path(p).resolve()) for p in (readable or [])]:
         if allowed:
-            lines.append(f"(allow file-read* (subpath {_quote(allowed)}))")
+            lines.append(f"(allow file-read-data (subpath {_quote(allowed)}))")
 
+    # Writes: only the run dir (repo, tmp, grading output) stays open. The
+    # sandbox matches resolved paths, so repo/node_modules symlinks into the
+    # shared install are covered by the dependency deny.
+    lines.extend(_protected_write_trees(home_s, run_s, deps_s))
     return "\n".join(lines) + "\n"
+
+
+def build_profile(home: Path, run_dir: Path, deps_dir: Path | None,
+                  rules: list[dict]) -> str:
+    """Worker SBPL profile: read-denies everywhere forbidden, write-denies the
+    protected trees while keeping the run dir writable for omp sessions/tmp."""
+    return _render(home, run_dir, deps_dir, rules)
+
+
+def grading_profile(home: Path, run_dir: Path, deps_dir: Path | None,
+                    pack_dir: Path, rules: list[dict]) -> str:
+    """Grading SBPL profile: the worker read rules plus its own pack dir.
+
+    Writes stay confined to the run dir (repo, tmp, grading output) and the
+    system temp/cache paths node and vitest need; the bench home outside the
+    run, the shared install and the public checkout stay write-denied.
+    """
+    return _render(home, run_dir, deps_dir, rules, readable=[Path(pack_dir)])
+
+
+def wrap(cmd: list[str], profile_path: Path) -> list[str]:
+    """Run ``cmd`` under a sandbox profile with GitHub tokens removed."""
+    return ["sandbox-exec", "-f", str(profile_path),
+            "env", "-u", "GITHUB_TOKEN", "-u", "GH_TOKEN", *cmd]
 
 
 def write_profile(run_dir: Path, profile: str) -> Path:
@@ -98,11 +138,12 @@ def _denial(res: dict) -> tuple[bool, str]:
 
 
 def proof(run_dir: Path, deps_dir: Path | None, rules: list[dict],
-          env: dict | None = None) -> dict:
+          env: dict | None = None, home: Path | None = None) -> dict:
     """Run the sandbox probes once per batch.
 
-    Every forbidden path that exists must be denied, the run repository and the
-    deps install must be readable, and GitHub tokens must be absent.
+    Every forbidden path that exists must be denied, the run repository and
+    deps install must be readable, writes to the protected trees must fail
+    while the run repo stays writable, and GitHub tokens must be absent.
     """
     run_dir = Path(run_dir)
     profile = run_dir / "sandbox.sb"
@@ -154,6 +195,41 @@ def proof(run_dir: Path, deps_dir: Path | None, rules: list[dict],
     else:
         checks.append({"kind": "allow", "category": "traversal",
                        "target": str(run_dir.resolve()), "ok": True, "detail": ""})
+
+    # Writes: the protected trees must reject, the run repository must accept.
+    probe_name = f".bench-write-probe-{os.getpid()}"
+    targets: list[tuple[str, Path]] = []
+    if home is not None:
+        targets.append(("home", Path(home) / probe_name))
+    if deps_dir:
+        targets.append(("deps", Path(deps_dir) / probe_name))
+    code = Path("~/code").expanduser()
+    if code.is_dir():
+        targets.append(("code", code / probe_name))
+    for label, target in targets:
+        if not target.parent.is_dir():
+            continue
+        res = _run(base + ["/usr/bin/touch", str(target)], env)
+        denied, detail = _denial(res)
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        checks.append({"kind": "write-deny", "category": label,
+                       "target": str(target), "ok": denied, "detail": detail})
+
+    repo = run_dir / "repo"
+    if repo.is_dir():
+        target = repo / probe_name
+        res = _run(base + ["/usr/bin/touch", str(target)], env)
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        checks.append({"kind": "write-allow", "category": "repo",
+                       "target": str(target), "ok": res["rc"] == 0,
+                       "detail": "" if res["rc"] == 0 else res["err"].strip()[-300:]})
+
     res = _run(base + ["/usr/bin/env"], env)
     leaked = [line for line in res["out"].splitlines()
               if line.startswith("GITHUB_TOKEN=") or line.startswith("GH_TOKEN=")]

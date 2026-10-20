@@ -69,17 +69,22 @@
   const rowId = (row) => row.id ?? `${row.model}:${row.effort ?? ""}`;
   const effBadge = (row) => (row.effort ? `<span class="eff">${esc(row.effort)}</span>` : "");
   const contaminated = (row) => !!row.flags?.contaminated;
+  // A row missing any cohort pack has no comparable score; draw it unranked
+  // below every ranked row, exactly like a contaminated row.
+  const incomplete = (row) => !!row.flags?.incomplete;
+  const unranked = (row) => contaminated(row) || incomplete(row);
   // Row flags (v2 only). 차이 작음 is meaningful only against the default ranking order.
   const flagTags = (row) => (row.flags ? [
     row.flags.contaminated ? `<span class="flag">${T.flagContaminated}</span>` : "",
     row.flags.critical ? `<span class="flag">${T.flagCritical}</span>` : "",
+    row.flags.incomplete ? `<span class="flag soft">${T.flagIncomplete}</span>` : "",
     row.flags.close && !state.sort ? `<span class="flag soft">${T.flagClose}</span>` : "",
   ].join("") : "");
 
   const ranked = (scope) => {
     const ms = scope.rank.map((k) => scope.metrics.find((m) => m.key === k)).filter(Boolean);
     return [...scope.rows].sort((a, b) => {
-      if (contaminated(a) !== contaminated(b)) return contaminated(a) ? 1 : -1;
+      if (unranked(a) !== unranked(b)) return unranked(a) ? 1 : -1;
       for (const m of ms) { const c = cmp(m, a.values[m.key], b.values[m.key]); if (c) return c; }
       return 0;
     });
@@ -93,9 +98,12 @@
     if (!views.some(([v]) => v === state.view)) state.view = "board";
     const seg = (items, cur, key) => `<div class="seg" role="group">${items.map(([id, label]) => `<button data-${key}="${id}" aria-pressed="${id === cur}">${label}</button>`).join("")}</div>`;
     // v2 and v1 can share a suite label; show the protocol only when the labels collide.
+    // Scout cohorts differ only by judge, so name the judge in the toggle.
     const suiteLabel = (s) => {
       const clash = role.suites.filter((x) => loc(x.label) === loc(s.label)).length > 1;
-      return loc(s.label) + (clash && s.protocol ? ` · ${s.protocol}` : "");
+      const judge = s.judge ? D.models[s.judge]?.short : "";
+      return [loc(s.label), clash && s.protocol ? s.protocol : "",
+        judge ? `${T.judge} ${judge}` : ""].filter(Boolean).join(" · ");
     };
     const right = [
       suite.archived ? `<span class="tag">${T.archived}</span>` : "",
@@ -139,7 +147,7 @@
     }).join("");
     const body = rows.map((row) => `
       <tr data-row="${rowId(row)}" tabindex="0" aria-selected="${state.sel === rowId(row)}">
-        <td class="rk">${contaminated(row) ? "" : official.indexOf(row) + 1}</td>
+        <td class="rk">${unranked(row) ? "" : official.indexOf(row) + 1}</td>
         <td>${modelCell(row)}</td>
         ${scope.metrics.map((m) => `<td class="${m.bar ? "" : "hide-sm"}">${barCell(m, row, maxOf(m, scope.rows))}</td>`).join("")}
       </tr>`).join("");
@@ -156,8 +164,12 @@
     const pts = scope.rows.filter((r) => num(mx, r.values[mx.key]) != null && num(my, r.values[my.key]) != null);
     const W = 1056, H = 420, L = 56, R = 170, Tp = 28, B = 48, iw = W - L - R, ih = H - Tp - B;
     const xs = pts.map((r) => num(mx, r.values[mx.key]));
-    const lo = Math.min(...xs) / 1.6, hi = Math.max(...xs) * 1.6;
-    const X = (v) => L + (1 - (Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo))) * iw;
+    // Log axis: zero/near-zero values pin to the smallest positive value so
+    // Math.log never sees a nonpositive number (all-zero data uses 1).
+    const positive = xs.filter((v) => v > 0);
+    const minPos = positive.length ? Math.min(...positive) : 1;
+    const lo = minPos / 1.6, hi = Math.max(...xs, minPos) * 1.6;
+    const X = (v) => L + (1 - (Math.log(Math.max(v, minPos)) - Math.log(lo)) / (Math.log(hi) - Math.log(lo))) * iw;
     const top = my.kind === "pct" ? 100 : 1;
     const ys = pts.map((r) => num(my, r.values[my.key]));
     const ylo = Math.max(0, Math.floor((Math.min(...ys) - top * 0.15) * (10 / top)) / (10 / top));
@@ -240,7 +252,7 @@
     $("#drawer").classList.toggle("open", !!row);
     if (!row) return;
     const rank = ranked(scope).indexOf(row) + 1;
-    const kicker = [contaminated(row) ? "" : `${rank}위`, `${esc(vendor(row).label)}${reps(row)}`, harness(row)].filter(Boolean).join(" · ");
+    const kicker = [unranked(row) ? "" : `${rank}위`, `${esc(vendor(row).label)}${reps(row)}`, harness(row)].filter(Boolean).join(" · ");
     const tasks = row.tasks ? suite.tasks.map((t) => {
       const tv = row.tasks[t.id] ?? {};
       const v = tv[scope.taskKey];

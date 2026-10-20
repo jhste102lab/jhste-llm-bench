@@ -68,11 +68,20 @@ prov, mdl = worker_model.split("/", 1)
 if scenario == "mismatch":
     delegation["context"] = delegation["context"] + " (tampered)"
 errors, completed = [], True
+terminal_error, runtime_aborted = None, False
 if scenario == "timeout":
     errors = [{"kind": "timeout", "message": "worker exceeded 45m"}]
+    terminal_error = errors[0]
     completed = False
 elif scenario == "quota":
     errors = [{"kind": "quota", "message": "usage limit reached"}]
+    terminal_error = errors[0]
+    completed = False
+elif scenario == "runtime-abort":
+    errors = [{"kind": "provider", "message": "Request was aborted"}]
+    terminal_error = {"kind": "timeout",
+                      "message": "Subagent runtime limit exceeded (task.maxRuntimeMs=1000)"}
+    runtime_aborted = True
     completed = False
 
 stamp = "2026-10-20T00-00-00-000Z_" + uuid.uuid4().hex
@@ -86,17 +95,38 @@ def write(path, entries):
         for entry in entries:
             handle.write(json.dumps(entry) + "\n")
 
+task_args = {"i": "Delegating", "context": delegation["context"],
+             "tasks": [{"agent": delegation["agent"], "task": delegation["task"]}]}
+if scenario == "two-tasks":
+    task_args["tasks"].append(dict(task_args["tasks"][0]))
+if scenario == "task-extra":
+    task_args["tasks"][0]["model"] = "annex/override:low"
+
 head_entries = [
     {"type": "session", "version": 3, "id": uuid.uuid4().hex, "timestamp": stamp, "cwd": cwd},
     {"type": "model_change", "model": head_model, "resolvedModelIsFallback": False},
     {"type": "thinking_level_change", "thinkingLevel": head_effort, "configured": None},
+]
+for extra in (["bash"] if scenario == "head-bash" else
+              ["todo"] if scenario == "head-todo" else []):
+    head_entries += [
+        {"type": "message", "message": {"role": "assistant", "provider": "openai-codex",
+         "model": head_model.split("/", 1)[1], "content": [{"type": "toolCall",
+         "id": "call_extra", "name": extra, "arguments": {"i": "extra"}}],
+         "usage": {"cost": {"total": 0.001}}}},
+        {"type": "message", "message": {"role": "toolResult", "toolCallId": "call_extra",
+         "toolName": extra, "content": [{"type": "text", "text": "ok"}]}},
+    ]
+head_entries += [
     {"type": "message", "message": {"role": "assistant", "provider": "openai-codex",
      "model": head_model.split("/", 1)[1], "content": [{"type": "toolCall", "id": "call_1",
-     "name": "task", "arguments": {"i": "Delegating", "context": delegation["context"],
-     "tasks": [{"agent": delegation["agent"], "task": delegation["task"]}]}}],
+     "name": "task", "arguments": task_args}],
      "usage": {"cost": {"total": 0.02}}}},
     {"type": "message", "message": {"role": "toolResult", "toolCallId": "call_1",
-     "toolName": "task", "content": [{"type": "text", "text": "worker finished"}]}},
+     "toolName": "task", "content": [{"type": "text", "text": "worker finished"}],
+     "details": {"results": [{"id": "Worker", "agent": delegation["agent"],
+                              "aborted": runtime_aborted,
+                              "abortReason": (terminal_error or {}).get("message")}]}}},
     {"type": "message", "message": {"role": "assistant", "provider": "openai-codex",
      "model": head_model.split("/", 1)[1], "content": [{"type": "text", "text": "done"}],
      "usage": {"cost": {"total": 0.01}}}},
@@ -116,7 +146,8 @@ worker_entries = [
      "usage": {"input": 100, "output": 50, "totalTokens": 150,
                "cost": {"input": 0.001, "output": 0.002, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.003}}}},
     {"type": "custom", "customType": "test_worker_state",
-     "data": {"errors": errors, "completed": completed}},
+     "data": {"errors": errors, "completed": completed,
+              "terminal_error": terminal_error, "runtime_aborted": runtime_aborted}},
     {"type": "custom", "customType": "session_exit", "data": {"reason": "dispose"}},
 ]
 write(os.path.join(worker_dir, "Worker.jsonl"), worker_entries)
@@ -144,25 +175,42 @@ def summarize(run_dir, protocol):  # noqa: ARG001 - contract signature
     sessions = run_dir / "sessions"
     head_files = sorted(p for p in sessions.glob("*.jsonl") if p.is_file())
     if not head_files:
-        return {"head": {"session": None, "cost_usd": 0.0, "delegations": [], "error": None},
+        return {"head": {"session": None, "cost_usd": 0.0, "tool_calls": [],
+                         "delegations": [], "error": None},
                 "worker": None}
     head_path = head_files[0]
     head_entries = _entries(head_path)
     cost = 0.0
     delegations = []
+    tool_calls = []
     error = None
     for entry in head_entries:
         if entry.get("type") == "custom" and entry.get("customType") == "test_head_error":
             error = entry.get("data", {}).get("message")
         message = entry.get("message") or {}
         for part in message.get("content") or []:
-            if part.get("type") == "toolCall" and part.get("name") == "task":
-                args = part.get("arguments") or {}
-                tasks = args.get("tasks") or []
-                for task in tasks:
-                    delegations.append({"agent": task.get("agent"),
-                                        "context": args.get("context"),
-                                        "task": task.get("task")})
+            if part.get("type") != "toolCall":
+                continue
+            tool_calls.append({"name": part.get("name")})
+            if part.get("name") != "task":
+                continue
+            args = part.get("arguments") or {}
+            tasks = args.get("tasks")
+            if isinstance(tasks, list):
+                entry_task = tasks[0] if tasks and isinstance(tasks[0], dict) else {}
+                allowed = {"agent", "task", "name", "i"}
+                count = len(tasks)
+            else:
+                entry_task = args
+                allowed = {"agent", "task", "name", "i", "context"}
+                count = 1
+            delegations.append({
+                "agent": entry_task.get("agent"),
+                "context": args.get("context"),
+                "task": entry_task.get("task"),
+                "tasks_count": count,
+                "extra_fields": sorted(set(entry_task) - allowed),
+            })
         usage = message.get("usage") or {}
         cost += ((usage.get("cost") or {}).get("total") or 0)
 
@@ -172,7 +220,8 @@ def summarize(run_dir, protocol):  # noqa: ARG001 - contract signature
         entries = _entries(worker_files[0])
         resolved = observed = thinking = None
         fallback = False
-        state = {"errors": [], "completed": True}
+        state = {"errors": [], "completed": True, "terminal_error": None,
+                 "runtime_aborted": False}
         text = ""
         worker_cost = 0.0
         tokens = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
@@ -205,13 +254,16 @@ def summarize(run_dir, protocol):  # noqa: ARG001 - contract signature
             "wall_seconds": 2.0, "cost_usd": worker_cost,
             "cost_breakdown": {"llm": worker_cost, "web": 0.0}, "tokens": tokens,
             "web": {"searches": 0, "fetches": 0, "input_tokens": 0, "total_tokens": 0},
-            "errors": state.get("errors") or [], "final_text": text,
+            "errors": state.get("errors") or [],
+            "terminal_error": state.get("terminal_error"),
+            "runtime_aborted": bool(state.get("runtime_aborted")),
+            "final_text": text,
             "completed": bool(state.get("completed")),
         }
 
     return {"head": {"session": str(head_path.relative_to(run_dir)),
-                     "cost_usd": round(cost, 6), "delegations": delegations,
-                     "error": error},
+                     "cost_usd": round(cost, 6), "tool_calls": tool_calls,
+                     "delegations": delegations, "error": error},
             "worker": worker}
 
 

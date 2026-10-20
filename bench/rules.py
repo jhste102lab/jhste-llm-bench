@@ -15,6 +15,10 @@ CATEGORIES = (
     "other-run", "evaluator",
 )
 
+# SQLite keeps committed pages in sidecar files next to the database; denying
+# the database alone leaves them readable.
+SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
 
 def _expand(raw: str) -> Path:
     return Path(os.path.expanduser(raw))
@@ -37,6 +41,12 @@ def _variants(path: Path) -> list[Path]:
         if real not in out:
             out.append(real)
     return out
+
+
+def _sidecars(path: Path) -> list[Path]:
+    if not path.name.endswith(".db"):
+        return []
+    return [Path(str(path) + suffix) for suffix in SIDECAR_SUFFIXES]
 
 
 def _other_runs(home: Path, run_dir: Path) -> list[Path]:
@@ -65,11 +75,15 @@ def forbidden_rules(home: Path, run_dir: Path, private: dict) -> list[dict]:
         if rule not in rules:
             rules.append(rule)
 
-    for entry in private.get("forbidden_paths") or []:
-        category = entry.get("category") or "other"
-        path = _expand(entry.get("path") or "")
+    def add_path(category: str, path: Path) -> None:
         for variant in _variants(path):
             add(category, "path", str(variant))
+            for sidecar in _sidecars(variant):
+                add(category, "path", str(sidecar))
+
+    for entry in private.get("forbidden_paths") or []:
+        category = entry.get("category") or "other"
+        add_path(category, _expand(entry.get("path") or ""))
 
     for entry in private.get("forbidden_domains") or []:
         add(entry.get("category") or "other", "domain", str(entry.get("pattern") or ""))
@@ -78,7 +92,7 @@ def forbidden_rules(home: Path, run_dir: Path, private: dict) -> list[dict]:
                            ("evaluator", home / "grades.jsonl")):
         if path.resolve() == run_dir.resolve():
             continue
-        add(category, "path", str(path.resolve()))
+        add_path(category, path.resolve())
 
     for run in _other_runs(home, run_dir):
         add("other-run", "path", str(run.resolve()))

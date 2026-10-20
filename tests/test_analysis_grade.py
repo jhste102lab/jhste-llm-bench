@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -35,9 +36,20 @@ class GradeTest(unittest.TestCase):
         shutil.copytree(FIXTURES, self.home)
         self._real_link = grade_module._link_deps
         grade_module._link_deps = lambda repo, node_modules: None
+        self._real = (grade_module._grading_profile, grade_module._rules,
+                      grade_module._wrap)
+        self.profiles = []
+        grade_module._rules = lambda home, run_dir: [
+            {"category": "evaluator", "kind": "path", "value": "/nonexistent"}]
+        grade_module._grading_profile = lambda home, run_dir, deps, pack_dir, rules: (
+            "(version 1)\n(allow default)\n")
+        grade_module._wrap = lambda cmd, profile: self.profiles.append(
+            (list(cmd), Path(profile))) or cmd
 
     def tearDown(self):
         grade_module._link_deps = self._real_link
+        (grade_module._grading_profile,
+         grade_module._rules, grade_module._wrap) = self._real
         self.tmp.cleanup()
 
     def run_dir(self, name):
@@ -71,7 +83,51 @@ class GradeTest(unittest.TestCase):
         self.assertEqual(record["kind"], "oracle")
         self.assertIn("workspace package escapes repo", record["setup_error"])
 
-    def test_no_headroom_above_baseline_raises(self):
+    def test_oracle_runs_in_grading_sandbox(self):
+        run = self.run_dir("b1-task-c1-fixture-a1")
+        grade_run(self.home, run, PROTOCOL)
+        profile = run / "grade.sb"
+        self.assertTrue(profile.is_file())
+        self.assertIn("(version 1)", profile.read_text())
+        self.assertEqual(len(self.profiles), 1)
+        cmd, profile_path = self.profiles[0]
+        self.assertEqual(profile_path, profile)
+        self.assertEqual(cmd[0], "bash")
+        self.assertEqual(Path(cmd[1]), self.home / "packs" / "task" / "c1" / "oracle" / "check.sh")
+
+    def test_malformed_oracle_cases_are_setup_error(self):
+        script = self.home / "packs" / "task" / "c1" / "oracle" / "check.sh"
+        script.write_text(
+            "#!/bin/sh\nprintf '%s' '{\"cases\":[{\"id\":\"ok\",\"passed\":\"yes\"}]}'"
+            " > \"$2\"\n")
+        record = grade_run(self.home, self.run_dir("b1-task-c1-fixture-a1"), PROTOCOL)
+        self.assertIsNone(record["score"])
+        self.assertIn("malformed", record["setup_error"])
+
+    def test_malformed_oracle_top_level_is_setup_error(self):
+        script = self.home / "packs" / "task" / "c1" / "oracle" / "check.sh"
+        script.write_text("#!/bin/sh\nprintf '%s' '{\"cases\":{}}' > \"$2\"\n")
+        record = grade_run(self.home, self.run_dir("b1-task-c1-fixture-a1"), PROTOCOL)
+        self.assertIsNone(record["score"])
+        self.assertIn("unreadable", record["setup_error"])
+
+    def test_file_item_suffix_needs_unique_source_match(self):
+        source = self.home / "packs" / "scout" / "s1" / "source"
+        for name in ("apps/a/src/index.ts", "apps/b/src/index.ts",
+                     "apps/a/src/unique.ts"):
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
+        files = grade_module._source_files(source.parent)
+        self.assertEqual(len(files), 3)
+        self.assertTrue(grade_module._file_covered(
+            "apps/a/src/unique.ts", "see src/unique.ts", files))
+        self.assertFalse(grade_module._file_covered(
+            "apps/a/src/index.ts", "see src/index.ts", files))
+        self.assertTrue(grade_module._file_covered(
+            "apps/a/src/index.ts", "see apps/a/src/index.ts", files))
+
+
         run = self.run_dir("b1-task-c3-fixture-a1")
         with self.assertRaises(ValueError):
             grade_run(self.home, run, PROTOCOL)
@@ -154,6 +210,54 @@ class JudgeTest(unittest.TestCase):
         self.assertNotIn("Opus", first)
         self.assertNotIn("GPT", first)
         self.assertEqual(len(judge_module.prompt_sha256("x", self.facts)), 64)
+
+    def _run_with_events(self, provider: str, name: str, requested: str):
+        seen = {}
+        proc = types.SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({
+            "type": "message_end",
+            "message": {"role": "assistant", "provider": provider, "model": name,
+                        "content": [{"type": "text", "text": "{}"}]}}))
+        real = judge_module.subprocess
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            seen["overlay"] = Path(cmd[cmd.index("--config") + 1]).read_text()
+            return proc
+
+        judge_module.subprocess = types.SimpleNamespace(
+            run=fake_run, TimeoutExpired=real.TimeoutExpired)
+        try:
+            judge_module._run_omp("prompt", requested, "medium")
+        finally:
+            judge_module.subprocess = real
+        return seen
+
+    def test_judge_disables_fallback_and_pins_model(self):
+        seen = self._run_with_events("anthropic", "claude-opus-5-5",
+                                     "anthropic/claude-opus-5-5")
+        self.assertIn("modelFallback: false", seen["overlay"])
+        self.assertIn("usageAwareFallback: false", seen["overlay"])
+        self.assertIn("fallbackChains: {}", seen["overlay"])
+        self.assertIn("--config", seen["cmd"])
+
+    def test_judge_rejects_other_model(self):
+        with self.assertRaises(RuntimeError):
+            self._run_with_events("anthropic", "claude-sonnet-5-5",
+                                  "anthropic/claude-opus-5-5")
+        with self.assertRaises(RuntimeError):
+            self._run_with_events("unknown", "role", "")
+
+    def test_judge_requires_observed_model(self):
+        seen = {}
+        proc = types.SimpleNamespace(returncode=0, stderr="", stdout="")
+        real = judge_module.subprocess
+        judge_module.subprocess = types.SimpleNamespace(
+            run=lambda cmd, **kwargs: proc, TimeoutExpired=real.TimeoutExpired)
+        try:
+            with self.assertRaises(RuntimeError):
+                judge_module._run_omp("prompt", "anthropic/claude-opus-5-5", "medium")
+        finally:
+            judge_module.subprocess = real
 
 
 if __name__ == "__main__":

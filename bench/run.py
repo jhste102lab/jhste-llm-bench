@@ -18,7 +18,6 @@ from . import pack as pack_mod
 from . import rules as rules_mod
 from . import sandbox as sandbox_mod
 
-RETRYABLE_OUTCOMES = {"quota-paused", "setup-error", "invalid"}
 SCORED_OUTCOMES = {"completed", "timeout"}
 QUOTA_HINTS = ("quota", "usage limit", "rate limit", "insufficient", "429")
 
@@ -115,7 +114,10 @@ def prepare_run(home: Path, protocol: dict, private: dict, batch: dict,
     run_id = run_id_for(batch, pack_id, key, attempt)
     run_dir = Path(home) / "runs" / batch["batch_id"] / run_id
     if run_dir.exists():
-        raise SystemExit(f"run dir already exists: {run_dir}")
+        if (run_dir / "run.json").is_file():
+            raise SystemExit(f"run dir already exists: {run_dir}")
+        # Interrupted preparation: no record was written, so rebuild in place.
+        shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True)
 
     source = pack_mod.require_source(home, role, pack_id)
@@ -168,71 +170,94 @@ def _quota_text(text: str | None) -> bool:
     return any(hint in lowered for hint in QUOTA_HINTS)
 
 
-def _delegation_check(delegations: list[dict], frozen: dict) -> tuple[bool, str]:
+def _delegation_check(head: dict, frozen: dict) -> tuple[bool, str]:
+    calls = head.get("tool_calls")
+    if calls is None:
+        return False, "head tool calls are missing from the summary"
+    names = [c.get("name") for c in calls if isinstance(c, dict)]
+    unexpected = [name for name in names if name not in ("task", "todo")]
+    if unexpected:
+        return False, f"head made non-delegation tool call(s): {unexpected}"
+    task_calls = [name for name in names if name == "task"]
+    if len(task_calls) != 1:
+        return False, f"head made {len(task_calls)} task call(s), expected exactly 1"
+
+    delegations = head.get("delegations") or []
     if len(delegations) != 1:
         return False, f"head made {len(delegations)} task delegation(s), expected exactly 1"
     found = delegations[0]
+    if int(found.get("tasks_count") or 0) != 1:
+        return False, (f"task call carries {found.get('tasks_count')} tasks, "
+                       "expected exactly 1")
+    extra = found.get("extra_fields") or []
+    if extra:
+        return False, f"task call has unexpected field(s): {', '.join(map(str, extra))}"
     for field in pack_mod.DELEGATION_FIELDS:
         if found.get(field) != frozen.get(field):
             return False, f"delegation {field} differs from the frozen arguments"
     return True, ""
 
 
+def _identity_check(worker: dict, model: str) -> tuple[bool, str]:
+    if worker.get("fallback"):
+        return False, "model fallback was used"
+    observed = worker.get("observed_models") or []
+    if any(m != model for m in observed):
+        return False, f"observed models {observed} != requested {model}"
+    resolved = worker.get("resolved_model") or ""
+    if not resolved:
+        return False, "worker resolved model missing"
+    if resolved.rsplit(":", 1)[0] != model:
+        return False, f"resolved model {resolved} != requested {model}"
+    return True, ""
+
+
 def classify(summary: dict, launched: dict, model: str,
              frozen: dict) -> tuple[str, str]:
-    if launched.get("timed_out"):
-        return "timeout", "runner wall-clock timeout"
     summary = summary or {}
     head = summary.get("head") or {}
     worker = summary.get("worker")
-    delegations = head.get("delegations") or []
 
     if worker is None:
         if _quota_text(head.get("error")):
             return "quota-paused", f"head hit quota: {head.get('error')}"
         if not head.get("session"):
             return "setup-error", f"no head session ({launched.get('rc')})"
-        ok, why = _delegation_check(delegations, frozen)
+        ok, why = _delegation_check(head, frozen)
         if not ok:
             return "invalid", why
+        if launched.get("timed_out"):
+            return "setup-error", "head wall-clock timeout without a worker session"
         return "setup-error", "worker session missing"
 
-    errors = worker.get("errors") or []
-    kinds = {e.get("kind") for e in errors}
-    if "quota" in kinds:
-        return "quota-paused", _first_message(errors, "quota")
-    if "timeout" in kinds:
-        return "timeout", _first_message(errors, "timeout")
-
-    ok, why = _delegation_check(delegations, frozen)
+    # Identity and assignment are validated before any timeout is accepted:
+    # a wrong or reassigned worker is invalid even if it ran out of time.
+    ok, why = _delegation_check(head, frozen)
+    if not ok:
+        return "invalid", why
+    ok, why = _identity_check(worker, model)
     if not ok:
         return "invalid", why
 
-    if worker.get("fallback"):
-        return "invalid", "model fallback was used"
-    observed = worker.get("observed_models") or []
-    if any(m != model for m in observed):
-        return "invalid", f"observed models {observed} != requested {model}"
-    resolved = worker.get("resolved_model") or ""
-    if not resolved:
-        return "invalid", "worker resolved model missing"
-    if resolved.rsplit(":", 1)[0] != model:
-        return "invalid", f"resolved model {resolved} != requested {model}"
-
-    if "provider" in kinds:
-        return "setup-error", _first_message(errors, "provider")
+    terminal = worker.get("terminal_error") or {}
+    kind = terminal.get("kind")
+    message = str(terminal.get("message") or kind or "")
+    if worker.get("runtime_aborted"):
+        return "timeout", message or "worker exceeded task.maxRuntimeMs"
+    if kind == "quota":
+        return "quota-paused", message
+    if kind == "timeout":
+        return "timeout", message or "worker timeout"
+    if launched.get("timed_out"):
+        return "timeout", "runner wall-clock timeout"
+    if kind == "provider":
+        return "setup-error", message
     if worker.get("completed"):
         return "completed", ""
+    errors = worker.get("errors") or []
     if errors:
-        return "setup-error", errors[0].get("message") or "worker error"
+        return "setup-error", str(errors[-1].get("message") or "worker error")
     return "invalid", "worker did not complete"
-
-
-def _first_message(errors: list[dict], kind: str) -> str:
-    for error in errors:
-        if error.get("kind") == kind:
-            return str(error.get("message") or kind)
-    return kind
 
 
 # ---------------------------------------------------------------- one run
@@ -332,7 +357,8 @@ def _run_specs(home: Path, protocol: dict, private: dict, batch: dict,
     isolation = {"ok": True, "checked": 0, "checks": []}
     if contexts:
         first = contexts[0]
-        isolation = sandbox_mod.proof(first["run_dir"], first["deps_nm"], first["rules"])
+        isolation = sandbox_mod.proof(first["run_dir"], first["deps_nm"],
+                                      first["rules"], home=home)
         home_mod.write_json(batch_dir / "isolation.json", isolation)
         if not isolation.get("ok"):
             failures = [c for c in isolation.get("checks", []) if not c.get("ok")]
@@ -379,7 +405,7 @@ def _parse_time(value: str | None):
 
 
 def update_concurrency(batch_dir: Path) -> None:
-    """Max overlapping runs per run of this batch, counting runs of every batch in HOME."""
+    """Peak simultaneous runs during each run's interval (all batches in HOME)."""
     batch_dir = Path(batch_dir)
     intervals: dict[Path, tuple] = {}
     for run_file in sorted(batch_dir.parent.glob("*/*/run.json")):
@@ -390,11 +416,25 @@ def update_concurrency(batch_dir: Path) -> None:
             datetime.max.replace(tzinfo=timezone.utc) if started else None)
         if started and ended:
             intervals[run_file.parent] = (started, ended)
+
+    # Count at each change point with closed intervals: starts before ends.
+    per_time: dict[datetime, list[int]] = {}
+    for start, end in intervals.values():
+        per_time.setdefault(start, [0, 0])[0] += 1
+        per_time.setdefault(end, [0, 0])[1] += 1
+    running = 0
+    active_at: dict[datetime, int] = {}
+    for moment in sorted(per_time):
+        starts, ends = per_time[moment]
+        running += starts
+        active_at[moment] = running
+        running -= ends
+
     for run_dir, (start, end) in intervals.items():
         if run_dir.parent != batch_dir:
             continue
-        count = sum(1 for other_start, other_end in intervals.values()
-                    if other_start <= end and start <= other_end)
+        count = max((value for moment, value in active_at.items()
+                     if start <= moment <= end), default=1)
         run_file = run_dir / "run.json"
         record = home_mod.read_json(run_file) or {}
         if record.get("concurrency") != count:
@@ -432,28 +472,30 @@ def update_batch(home: Path, protocol: dict, batch: dict) -> dict:
     """Recompute baseline drift for the batch and persist batch.json."""
     batch_dir = Path(home) / "runs" / batch["batch_id"]
     grades = latest_grades(home)
-    runs = _batch_runs(batch_dir)
 
-    baseline = [grades[r["run_id"]] for r in runs
-                if r.get("baseline") and r["run_id"] in grades
-                and r.get("outcome") in SCORED_OUTCOMES]
-    scores = [g["score"] for g in baseline if isinstance(g.get("score"), (int, float))]
-
+    current = _baseline_scores(home, batch["batch_id"], grades)
     quarantined, reason = False, None
     if batch.get("accepted"):
-        scores = []
-    if scores:
-        current = sum(scores) / len(scores)
-        reference = _accepted_baseline_scores(home, protocol, batch, grades)
+        current = {}
+    if current:
+        reference = _baseline_reference(home, batch, grades)
         if reference:
-            previous = sum(reference) / len(reference)
-            moved_pp = abs(current - previous) * 100
+            common = sorted(set(reference) & set(current))
+        else:
+            common = []
+        if common:
+            now = sum(current[p] for p in common) / len(common)
+            previous = sum(reference[p] for p in common) / len(common)
+            moved_pp = abs(now - previous) * 100
             if moved_pp > protocol["baseline_drift_pp"]:
                 quarantined = True
                 reason = (f"baseline moved {moved_pp:.1f}pp "
-                          f"({previous:.3f} -> {current:.3f}); "
+                          f"({previous:.3f} -> {now:.3f}); "
                           f"limit {protocol['baseline_drift_pp']}pp")
-        batch["baseline_score"] = round(current, 4)
+            batch["baseline_score"] = round(now, 4)
+        else:
+            batch["baseline_score"] = round(
+                sum(current.values()) / len(current), 4)
 
     batch["quarantined"] = quarantined
     batch["quarantine_reason"] = reason
@@ -461,29 +503,52 @@ def update_batch(home: Path, protocol: dict, batch: dict) -> dict:
     return batch
 
 
-def _accepted_baseline_scores(home: Path, protocol: dict, batch: dict,
-                              grades: dict[str, dict]) -> list[float]:
+def _baseline_scores(home: Path, batch_id: str,
+                     grades: dict[str, dict]) -> dict[str, float]:
+    """Equal-weight baseline score per pack for one batch."""
+    by_pack: dict[str, list[float]] = {}
+    for run in _batch_runs(Path(home) / "runs" / batch_id):
+        if not run.get("baseline") or run.get("outcome") not in SCORED_OUTCOMES:
+            continue
+        record = grades.get(run.get("run_id"))
+        if not record or not isinstance(record.get("score"), (int, float)):
+            continue
+        by_pack.setdefault(run.get("pack"), []).append(float(record["score"]))
+    return {pack: sum(scores) / len(scores) for pack, scores in by_pack.items()}
+
+
+def _baseline_reference(home: Path, batch: dict,
+                        grades: dict[str, dict]) -> dict[str, float]:
+    """Baseline scores of the latest earlier accepted comparable batch.
+
+    Comparable = same role and protocol, and for scout the same judge. Scores
+    are returned per pack so drift compares the common pack set with equal
+    weight per pack.
+    """
     runs_root = Path(home) / "runs"
-    scores: list[float] = []
     if not runs_root.is_dir():
-        return scores
-    for other_dir in sorted(p for p in runs_root.iterdir() if p.is_dir()):
+        return {}
+    candidates = []
+    current_order = (batch.get("created_at") or "", batch["batch_id"])
+    for other_dir in (p for p in runs_root.iterdir() if p.is_dir()):
         if other_dir.name == batch["batch_id"]:
             continue
         other = home_mod.read_json(other_dir / "batch.json") or {}
         if not other.get("accepted") or other.get("quarantined"):
             continue
-        if other.get("role") != batch["role"] or other.get("protocol") != batch["protocol"]:
+        if other.get("role") != batch.get("role"):
             continue
-        for run in _batch_runs(other_dir):
-            record = grades.get(run.get("run_id"))
-            if not run.get("baseline") or not record:
-                continue
-            if run.get("outcome") not in SCORED_OUTCOMES:
-                continue
-            if isinstance(record.get("score"), (int, float)):
-                scores.append(record["score"])
-    return scores
+        if other.get("protocol") != batch.get("protocol"):
+            continue
+        if batch.get("role") == "scout" and (other.get("judge") or {}) != (batch.get("judge") or {}):
+            continue
+        if (other.get("created_at") or "", other_dir.name) >= current_order:
+            continue
+        candidates.append((other.get("created_at") or "", other_dir.name, other_dir))
+    if not candidates:
+        return {}
+    _, _, reference_dir = max(candidates)
+    return _baseline_scores(home, reference_dir.name, grades)
 
 
 def start(home: Path, protocol: dict, private: dict, role: str,
@@ -549,22 +614,24 @@ def retry(home: Path, protocol: dict, private: dict, batch_id: str,
     manifest_sha = manifest_mod.manifest_sha256(home)
 
     judge = judge or batch.get("judge") or dict(protocol["judge_default"])
-    latest: dict[tuple[str, str], dict] = {}
-    for run in _batch_runs(Path(home) / "runs" / batch_id):
+    runs = _batch_runs(Path(home) / "runs" / batch_id)
+    by_slot: dict[tuple[str, str], list[dict]] = {}
+    for run in runs:
         key = (run.get("pack"), (run.get("config") or {}).get("key"))
-        current = latest.get(key)
-        if current is None or int(run.get("attempt") or 0) > int(current.get("attempt") or 0):
-            latest[key] = run
+        by_slot.setdefault(key, []).append(run)
 
-    packs = batch.get("packs") or sorted({pack for pack, _ in latest})
+    packs = batch.get("packs") or sorted({pack for pack, _ in by_slot})
+    wanted = max(1, int(batch.get("attempts") or 1))
     specs: list[tuple[str, str, int]] = []
     for pack_id in packs:
         for key in batch.get("configs") or []:
-            record = latest.get((pack_id, key))
-            if record is None:
-                specs.append((pack_id, key, 1))
-            elif record.get("outcome") in RETRYABLE_OUTCOMES:
-                specs.append((pack_id, key, int(record.get("attempt") or 0) + 1))
+            existing = by_slot.get((pack_id, key), [])
+            scored = sum(1 for r in existing
+                         if r.get("outcome") in SCORED_OUTCOMES)
+            attempt = max((int(r.get("attempt") or 0) for r in existing), default=0) + 1
+            for _ in range(max(0, wanted - scored)):
+                specs.append((pack_id, key, attempt))
+                attempt += 1
     if not specs:
         return {"batch": batch, "runs": [], "skipped": "no retryable runs"}
     return _run_specs(home, protocol, private, batch, specs, judge, parallel, manifest_sha)
@@ -634,7 +701,7 @@ def isolation_check(home: Path, private: dict) -> dict:
     rules = rules_mod.forbidden_rules(home, probe, private)
     sandbox_mod.write_profile(probe, sandbox_mod.build_profile(
         home, probe, deps_nm, rules))
-    result = sandbox_mod.proof(probe, deps_nm, rules)
+    result = sandbox_mod.proof(probe, deps_nm, rules, home=home)
     result["run_dir"] = str(probe)
     shutil.rmtree(probe, ignore_errors=True)
     return result

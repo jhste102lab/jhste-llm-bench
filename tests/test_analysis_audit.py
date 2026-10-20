@@ -35,22 +35,31 @@ class AuditTest(unittest.TestCase):
 
     def test_blocked_and_contamination(self):
         result = audit(self.run_dir, self.rules)
-        # c1 ~/code denied, c4 bash cat denied, c9 ~/.ssh denied.
-        self.assertEqual(result["blocked"], 3)
+        # c1 ~/code denied, c4 bash denial names the path, c9 ~/.ssh denied,
+        # c12 URL fetch failed. c10's bare "Operation not permitted" line does
+        # not name its target, and domains are never sandboxed.
+        self.assertEqual(result["blocked"], 4)
         self.assertTrue(result["contaminated"])
         self.assertEqual(result["accessed"],
-                         [{"category": "answer", "count": 1},
+                         [{"category": "answer", "count": 2},
                           {"category": "other-run", "count": 1},
-                          {"category": "production", "count": 1}])
+                          {"category": "production", "count": 2}])
 
         by_target = {(e["tool"], e["category"], e["blocked"]) for e in result["events"]}
         self.assertIn(("read", "answer", True), by_target)
         self.assertIn(("bash", "answer", True), by_target)
+        self.assertIn(("bash", "answer", False), by_target)
         self.assertIn(("read", "credential", True), by_target)
         self.assertIn(("read", "production", False), by_target)
+        self.assertIn(("read", "production", True), by_target)
         self.assertIn(("write", "other-run", False), by_target)
         # A web search query is not an access.
         self.assertNotIn("web_search", {e["tool"] for e in result["events"]})
+        # Arguments come from the assistant toolCall block, not the custom
+        # record (c2's tool_execution_start carries no args).
+        self.assertIn(str(Path("/tmp/bench-audit-forbidden/secret.txt")),
+                      [e["target"] for e in result["events"]
+                       if e["tool"] == "read" and e["category"] == "answer"])
 
     def test_repo_reads_are_never_violations(self):
         rules = [{"category": "answer", "kind": "path", "value": str(self.run_dir)}]
@@ -71,7 +80,7 @@ class AuditTest(unittest.TestCase):
                   "value": "example-catalog.test/data"}]
         result = audit(self.run_dir, rules)
         self.assertTrue(result["contaminated"])
-        self.assertEqual(result["accessed"], [{"category": "private-repo", "count": 1}])
+        self.assertEqual(result["accessed"], [{"category": "private-repo", "count": 2}])
 
 
 if __name__ == "__main__":

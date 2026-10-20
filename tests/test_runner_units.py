@@ -28,7 +28,8 @@ class RulesTest(unittest.TestCase):
             (home / "packs").mkdir()
             (home / "grades.jsonl").write_text("")
             private = {
-                "forbidden_paths": [{"category": "answer", "path": "/tmp/answer-zone"}],
+                "forbidden_paths": [{"category": "answer", "path": "/tmp/answer-zone"},
+                                    {"category": "credential", "path": "/tmp/state.db"}],
                 "forbidden_domains": [{"category": "production", "pattern": "example.com"}],
             }
             found = rules.forbidden_rules(home, run_dir, private)
@@ -36,6 +37,9 @@ class RulesTest(unittest.TestCase):
             values = {r["value"] for r in paths}
             self.assertIn("/tmp/answer-zone", values)
             self.assertIn("/private/tmp/answer-zone", values)
+            for suffix in rules.SIDECAR_SUFFIXES:
+                self.assertIn(f"/private/tmp/state.db{suffix}", values)
+                self.assertIn(f"/tmp/state.db{suffix}", values)
             self.assertIn(str((home / "packs").resolve()), values)
             self.assertIn(str((home / "grades.jsonl").resolve()), values)
             self.assertIn(str(other.resolve()), values)
@@ -105,6 +109,34 @@ class DepsTest(unittest.TestCase):
     def test_missing_shared_install_is_refused(self) -> None:
         with self.assertRaises(RuntimeError):
             deps.link_deps(self.repo, self.root / "nowhere")
+
+    def test_nested_generated_tree_is_relinked(self) -> None:
+        shared_nested = self.shared.parent / "packages" / "lib" / "node_modules"
+        (shared_nested / "leftpad").mkdir(parents=True)
+        (shared_nested / "leftpad" / "index.js").write_text("module.exports = 1;\n")
+
+        first = deps.link_deps(self.repo, self.shared)
+        self.assertEqual(first["nested"], ["packages/lib/node_modules"])
+        nested = self.repo / "packages" / "lib" / "node_modules"
+        self.assertTrue((nested / deps.MARKER).is_file())
+
+        # Grading calls link_deps again on an already-prepared repo.
+        second = deps.link_deps(self.repo, self.shared)
+        self.assertEqual(second["nested"], ["packages/lib/node_modules"])
+        self.assertEqual((nested / "leftpad").resolve(),
+                         (shared_nested / "leftpad").resolve())
+
+    def test_foreign_nested_install_is_refused(self) -> None:
+        shared_nested = self.shared.parent / "packages" / "lib" / "node_modules"
+        (shared_nested / "leftpad").mkdir(parents=True)
+        nested = self.repo / "packages" / "lib" / "node_modules"
+        (nested / "prebuilt").mkdir(parents=True)
+        (nested / "prebuilt" / "index.js").write_text("x\n")
+        with self.assertRaises(RuntimeError):
+            deps.link_deps(self.repo, self.shared)
+        result = deps.link_deps(self.repo, self.shared, force=True)
+        self.assertEqual(result["nested"], ["packages/lib/node_modules"])
+        self.assertFalse((nested / "prebuilt").exists())
 
 
 class ManifestTest(unittest.TestCase):
@@ -288,12 +320,53 @@ class SandboxProfileTest(unittest.TestCase):
             home_rule = [line for line in lines if str(home) in line
                          and "require-all" in line][0]
             self.assertIn(f"(require-not (subpath \"{run_dir.resolve()}\"))", home_rule)
-            self.assertTrue(any(f"(allow file-read* (subpath \"{run_dir.resolve()}\"))"
+            self.assertTrue(any(f"(allow file-read-data (subpath \"{run_dir.resolve()}\"))"
                                 == line for line in lines))
             self.assertTrue(any("require-not" in line and str(deps_dir.resolve()) in line
                                 for line in lines))
             self.assertNotIn("example.com", text)
             self.assertIn(f'(deny file-read-data (subpath "{secret}"))', text)
+            self.assertIn(
+                f"(deny file-write* (require-all (subpath \"{home.resolve()}\") "
+                f"(require-not (subpath \"{run_dir.resolve()}\"))))", text)
+            self.assertIn(f'(deny file-write* (subpath "{deps_dir.resolve()}"))', text)
+            self.assertIn(f'(deny file-write* (subpath "{Path("~/code").expanduser().resolve()}"))',
+                          text)
+
+    @unittest.skipUnless(shutil.which("sandbox-exec"), "macOS sandbox-exec required")
+    def test_grading_profile_reads_the_pack_but_not_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve() / "home"
+            run_dir = home / "runs" / "b1" / "r1"
+            run_dir.mkdir(parents=True)
+            deps_dir = home / "deps" / "demo" / "node_modules"
+            deps_dir.mkdir(parents=True)
+            pack_dir = home / "packs" / "task" / "c1"
+            other_pack = home / "packs" / "task" / "c2"
+            for pack in (pack_dir, other_pack):
+                pack.mkdir(parents=True)
+                (pack / "check.sh").write_text("echo ok\n")
+            found = [{"category": "evaluator", "kind": "path", "value": str(home / "packs")}]
+            profile = run_dir / "grade.sb"
+            profile.write_text(sandbox.grading_profile(home, run_dir, deps_dir, pack_dir, found))
+
+            def cat(path: Path) -> int:
+                return subprocess.run(sandbox.wrap(["/bin/cat", str(path)], profile),
+                                      capture_output=True).returncode
+
+            self.assertEqual(cat(pack_dir / "check.sh"), 0)
+            self.assertNotEqual(cat(other_pack / "check.sh"), 0)
+            touched = subprocess.run(
+                sandbox.wrap(["/usr/bin/touch", str(deps_dir / "x")], profile),
+                capture_output=True).returncode
+            self.assertNotEqual(touched, 0)
+
+    def test_wrap_uses_profile_and_strips_tokens(self) -> None:
+        cmd = sandbox.wrap(["omp", "-p"], Path("/tmp/run/sandbox.sb"))
+        self.assertEqual(cmd[:6], ["sandbox-exec", "-f", "/tmp/run/sandbox.sb",
+                                   "env", "-u", "GITHUB_TOKEN"])
+        self.assertEqual(cmd[6:8], ["-u", "GH_TOKEN"])
+        self.assertEqual(cmd[8:], ["omp", "-p"])
 
     def test_missing_profile_fails_proof(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -303,23 +376,40 @@ class SandboxProfileTest(unittest.TestCase):
 
 
 class ConcurrencyTest(unittest.TestCase):
+    def _write(self, batch_dir: Path, spans: dict) -> None:
+        for name, (start, end) in spans.items():
+            run_dir = batch_dir / name
+            run_dir.mkdir(parents=True)
+            (run_dir / "run.json").write_text(json.dumps({
+                "run_id": name, "started_at": start, "ended_at": end,
+                "concurrency": 0}))
+
+    def _counts(self, batch_dir: Path, names) -> dict:
+        return {name: json.loads((batch_dir / name / "run.json").read_text())["concurrency"]
+                for name in names}
+
     def test_overlap_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             batch_dir = Path(tmp) / "b1"
             spans = {"a": ("2026-10-20T00:00:00Z", "2026-10-20T00:10:00Z"),
                      "b": ("2026-10-20T00:05:00Z", "2026-10-20T00:15:00Z"),
                      "c": ("2026-10-20T00:20:00Z", "2026-10-20T00:25:00Z")}
-            for name, (start, end) in spans.items():
-                run_dir = batch_dir / name
-                run_dir.mkdir(parents=True)
-                (run_dir / "run.json").write_text(json.dumps({
-                    "run_id": name, "started_at": start, "ended_at": end,
-                    "concurrency": 0}))
+            self._write(batch_dir, spans)
             from bench import run as run_mod
             run_mod.update_concurrency(batch_dir)
-            counts = {name: json.loads((batch_dir / name / "run.json").read_text())
-                      ["concurrency"] for name in spans}
-            self.assertEqual(counts, {"a": 2, "b": 2, "c": 1})
+            self.assertEqual(self._counts(batch_dir, spans), {"a": 2, "b": 2, "c": 1})
+
+    def test_peak_not_intersection_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            batch_dir = Path(tmp) / "b1"
+            # A spans both B and C, but only two runs are ever active at once.
+            spans = {"a": ("2026-10-20T00:00:00Z", "2026-10-20T00:30:00Z"),
+                     "b": ("2026-10-20T00:00:00Z", "2026-10-20T00:10:00Z"),
+                     "c": ("2026-10-20T00:20:00Z", "2026-10-20T00:30:00Z")}
+            self._write(batch_dir, spans)
+            from bench import run as run_mod
+            run_mod.update_concurrency(batch_dir)
+            self.assertEqual(self._counts(batch_dir, spans), {"a": 2, "b": 2, "c": 2})
 
 
 if __name__ == "__main__":
