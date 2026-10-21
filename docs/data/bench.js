@@ -15,6 +15,7 @@
     wrong: { key: "wrong", kind: "count", better: "low" },
     icost: { key: "icost", kind: "usd", better: "low", bar: true },
     qcost: { key: "qcost", kind: "usd", better: "low", bar: true },
+    lat: { key: "lat", kind: "sec", better: "low", bar: true },
     planted: { key: "planted", kind: "ratio", better: "high" },
     tokens: { key: "tokens", kind: "tokens", better: "low", bar: true },
     jobs: { key: "jobs", kind: "count", better: "high" },
@@ -44,6 +45,7 @@
       brave: { name: "Brave Search", short: "Brave", vendor: "engine" },
       tinyfish: { name: "TinyFish", short: "TinyFish", vendor: "engine" },
       parallel: { name: "Parallel", short: "Parallel", vendor: "engine" },
+      dsearch: { name: "DeepSeek Search API", short: "DeepSeek", vendor: "deepseek" },
     },
     roles: [
       {
@@ -248,17 +250,34 @@
         id: "web",
         suites: [
           {
-            id: "search", label: { ko: "웹검색" }, protocol: "v1", date: "2026.10.14", runs: 1350, taskCount: 75, unit: "item", tasks: [],
+            id: "search", label: { ko: "웹검색" }, protocol: "v1", date: "2026.10.14 · 10.21", runs: 1575, taskCount: 75, unit: "item",
+            tasks: [
+              { id: "tech", label: { ko: "기술 정확값 (25)" } },
+              { id: "hop", label: { ko: "여러 단계 추론 (11)" } },
+              { id: "tail", label: { ko: "잘 안 알려진 사실 (11)" } },
+              { id: "ko", label: { ko: "한국어 (10)" } },
+              { id: "fresh", label: { ko: "최신 버전 (11)" } },
+              { id: "trap", label: { ko: "함정 (7)" } },
+            ],
             scopes: {
               worker: {
-                metrics: [M.acc, M.qcost], rank: ["acc"], scatter: { x: "qcost", y: "acc" },
+                metrics: [M.acc, M.qcost, M.lat], rank: ["acc"], scatter: { x: "qcost", y: "acc" },
+                taskKey: "acc",
                 rows: [
-                  { model: "luna", effort: null, n: 3, ci: { acc: [90.9, 97.6] }, values: { acc: 94.4, qcost: 0.0007 } },
-                  { model: "exa", effort: null, n: 3, values: { acc: 85.8, qcost: 0.014 } },
-                  { model: "brave", effort: null, n: 3, values: { acc: 84.0, qcost: null } },
-                  { model: "tinyfish", effort: null, n: 3, values: { acc: 76.7, qcost: null } },
-                  { model: "parallel", effort: null, n: 3, values: { acc: 74.0, qcost: null } },
-                  { model: "haiku", effort: null, n: 3, ci: { acc: [49.3, 68.9] }, values: { acc: 59.3, qcost: 0.02 } },
+                  { model: "luna", effort: null, n: 3, ci: { acc: [90.9, 97.6] }, values: { acc: 94.4, qcost: 0.0007, lat: 6.5 },
+                    tasks: { tech: { acc: 97 }, hop: { acc: 100 }, tail: { acc: 100 }, ko: { acc: 90 }, fresh: { acc: 79 }, trap: { acc: 100 } } },
+                  { model: "dsearch", effort: null, n: 3, ci: { acc: [80.7, 92.7] }, flags: { judge: true }, values: { acc: 87.1, qcost: 0.00075, lat: 0.8 },
+                    tasks: { tech: { acc: 91 }, hop: { acc: 79 }, tail: { acc: 100 }, ko: { acc: 95 }, fresh: { acc: 77 }, trap: { acc: 71 } } },
+                  { model: "exa", effort: null, n: 3, ci: { acc: [80.7, 90.4] }, values: { acc: 85.8, qcost: 0.014, lat: 7.7 },
+                    tasks: { tech: { acc: 91 }, hop: { acc: 94 }, tail: { acc: 80 }, ko: { acc: 75 }, fresh: { acc: 80 }, trap: { acc: 86 } } },
+                  { model: "brave", effort: null, n: 3, ci: { acc: [76.7, 90.7] }, values: { acc: 84.0, qcost: null, lat: 1.3 },
+                    tasks: { tech: { acc: 94 }, hop: { acc: 82 }, tail: { acc: 95 }, ko: { acc: 80 }, fresh: { acc: 68 }, trap: { acc: 64 } } },
+                  { model: "tinyfish", effort: null, n: 3, ci: { acc: [69.3, 83.3] }, values: { acc: 76.7, qcost: null, lat: 1.0 },
+                    tasks: { tech: { acc: 86 }, hop: { acc: 73 }, tail: { acc: 82 }, ko: { acc: 80 }, fresh: { acc: 73 }, trap: { acc: 43 } } },
+                  { model: "parallel", effort: null, n: 3, ci: { acc: [66.9, 80.7] }, values: { acc: 74.0, qcost: null, lat: 2.3 },
+                    tasks: { tech: { acc: 85 }, hop: { acc: 77 }, tail: { acc: 82 }, ko: { acc: 87 }, fresh: { acc: 55 }, trap: { acc: 29 } } },
+                  { model: "haiku", effort: null, n: 3, ci: { acc: [49.3, 68.9] }, values: { acc: 59.3, qcost: 0.02, lat: 6.6 },
+                    tasks: { tech: { acc: 41 }, hop: { acc: 36 }, tail: { acc: 64 }, ko: { acc: 75 }, fresh: { acc: 92 }, trap: { acc: 81 } } },
                 ],
               },
             },
