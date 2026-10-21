@@ -47,6 +47,7 @@
       case "pct": return `${v.toFixed(1)}<small>%</small>`;
       case "usd": return `$${sig(v)}`;
       case "dur": { const mins = v / 60; return `${mins < 10 ? mins.toFixed(1) : Math.round(mins)}<small>${T.units.min}</small>`; }
+      case "sec": return `${v.toFixed(1)}<small>${T.units.sec}</small>`;
       case "tokens": return v >= 1e6 ? `${(v / 1e6).toFixed(1)}<small>M</small>` : `${Math.round(v / 1e3)}<small>K</small>`;
       default: return `${v}`;
     }
@@ -79,6 +80,7 @@
     row.flags.critical ? `<span class="flag">${T.flagCritical}</span>` : "",
     row.flags.incomplete ? `<span class="flag soft">${T.flagIncomplete}</span>` : "",
     row.flags.close && !state.sort ? `<span class="flag soft">${T.flagClose}</span>` : "",
+    row.flags.judge ? `<span class="flag soft">${T.flagJudge}</span>` : "",
   ].join("") : "");
 
   const ranked = (scope) => {
